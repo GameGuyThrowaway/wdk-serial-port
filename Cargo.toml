@@ -1,0 +1,26 @@
+[package]
+name = "wdk-serialport"
+version = "0.1.0"
+edition = "2021"
+authors = ["GameGuyThrowaway"]
+repository = "https://github.com/GameGuyThrowaway/wdk-serialport"
+description = "A serial port interface library for my Ferrum Windows kernel driver development."
+
+[package.metadata.wdk.driver-model]
+driver-type = "KMDF"
+kmdf-version-major = 1
+target-kmdf-version-minor = 33
+
+[dependencies]
+wdk = ">=0.3.1"
+wdk-alloc = ">=0.3.1"
+wdk-sys = ">=0.4.0"
+wdk-mutex = { git = "https://github.com/GameGuyThrowaway/wdk-mutex.git" }
+
+[profile.dev]
+panic = "abort"
+lto = true
+
+[profile.release]
+panic = "abort"
+lto = true

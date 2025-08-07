@@ -12,7 +12,7 @@ use wdk_alloc::WdkAllocator;
 use wdk_mutex::kmutex::KMutex;
 use wdk_sys::{
     ntddk::{
-        memcpy, IoBuildAsynchronousFsdRequest, IoBuildDeviceIoControlRequest,
+        IoBuildDeviceIoControlRequest,
         IoBuildSynchronousFsdRequest, IoSetCompletionRoutineEx, IofCallDriver, KeInitializeEvent,
         KeWaitForSingleObject, ObfDereferenceObject, ZwClose,
     },
@@ -328,111 +328,6 @@ impl Port {
         if nt_success(driver_call_status) {
             Ok(io_status.Information as usize)
         } else {
-            Err(SendIRPErr::CallDriverError(driver_call_status))
-        }
-    }
-
-    ///
-    /// `write` queues a write of some data on a port asynchronously.
-    ///
-    /// # Arguments
-    ///
-    /// * `data` - The data to write.
-    ///
-    /// # Return value:
-    ///
-    /// * `Ok()` - If successful.
-    /// * `Err(PortWriteErr)` - Otherwise.
-    ///
-    #[deprecated = "This function seems to block longer (at least for com0com) than the blocking version."]
-    #[allow(dead_code)]
-    pub fn write_async(&self, data: &[u8]) -> Result<(), SendIRPErr> {
-        let data_layout = Layout::from_size_align(data.len(), 1).unwrap();
-        // SAFETY: This is safe because:
-        //         The result pointer is compared against null.
-        let data_clone = unsafe { WdkAllocator.alloc(data_layout) };
-
-        if data_clone.is_null() {
-            return Err(SendIRPErr::FailedToCloneData);
-        }
-
-        // SAFETY: This is safe because:
-        //         1. `data_clone` is a verified valid pointer to a buffer
-        //            of length == data.len().
-        unsafe {
-            memcpy(
-                data_clone as *mut _,
-                data.as_ptr() as *const _,
-                data.len() as u64,
-            );
-        }
-
-        // SAFETY: This is safe because:
-        //         1. `device_object` is guaranteed to be a valid PDEVICE_OBJECT
-        //            by the invariant in the field definition.
-        //         2. Buffer is a pointer to a buffer with len = data.len().
-        //         3. StartingOffset is allowed to be null.
-        //         4. `io_status` is allowed to be null.
-        //         5. `data_clone` will live longer than this request, as it
-        //            is only freed during the cleanup routine.
-        let irp = unsafe {
-            IoBuildAsynchronousFsdRequest(
-                IRP_MJ_WRITE,
-                self.device_object,
-                data_clone as *mut _,
-                data.len() as u32,
-                null_mut(),
-                null_mut(),
-            )
-        };
-
-        if irp.is_null() {
-            return Err(SendIRPErr::IRPBuildError);
-        }
-
-        // SAFETY: This is safe because:
-        //         1. `device_object` is a pointer to a valid DEVICE_OBJECT.
-        //         2. `irp` is a pointer to a valid IRP.
-        //         3. `data_clone` is a pointer to a valid buffer, whose
-        //            lifetime is only ended by the callback routine.
-        //         4. `async_write_completion_routine` is a guaranteed safe
-        //            function.
-        let status = unsafe {
-            IoSetCompletionRoutineEx(
-                self.device_object,
-                irp,
-                Some(async_write_completion_routine),
-                data_clone as *mut _,
-                true as u8,
-                true as u8,
-                true as u8,
-            )
-        };
-        if !nt_success(status) {
-            // SAFETY: This is safe because:
-            //         1. `data_clone` is a valid WdkAllocator allocated pool,
-            //            with no dangling pointers.
-            unsafe {
-                WdkAllocator.dealloc(data_clone, DEALLOC_LAYOUT);
-            }
-            return Err(SendIRPErr::FailedToSetCompletionRoutine(status));
-        }
-
-        // SAFETY: This is safe because:
-        //         1. `device_object` is guaranteed to be a valid PDEVICE_OBJECT
-        //            by the invariant in the field definition.
-        //         2. `irp` is guaranteed to be a valid IRP because it isn't
-        //            null, and was returned by IoBuildSynchronousFsdRequest.
-        let driver_call_status = unsafe { IofCallDriver(self.device_object, irp) };
-        if nt_success(driver_call_status) {
-            Ok(())
-        } else {
-            // SAFETY: This is safe because:
-            //         1. `data_clone` is a valid WdkAllocator allocated pool,
-            //            with no dangling pointers.
-            unsafe {
-                WdkAllocator.dealloc(data_clone, DEALLOC_LAYOUT);
-            }
             Err(SendIRPErr::CallDriverError(driver_call_status))
         }
     }
@@ -1090,22 +985,6 @@ unsafe extern "C" fn async_ioctl_completion_routine(
 
             WdkAllocator.dealloc(context as *mut _, DEALLOC_LAYOUT);
         }
-    }
-    STATUS_SUCCESS
-}
-
-// SAFETY: This is safe because:
-//         1. This routine is only used by `async_write`, guaranteeing the
-//            invariant should be maintained.
-//         2. `context` is always be a buffer allocated via WdkAllocator,
-//            and thus should never be null.
-unsafe extern "C" fn async_write_completion_routine(
-    _device_object: *mut _DEVICE_OBJECT,
-    _irp: *mut _IRP,
-    context: *mut c_void,
-) -> NTSTATUS {
-    if !context.is_null() {
-        WdkAllocator.dealloc(context as *mut _, DEALLOC_LAYOUT);
     }
     STATUS_SUCCESS
 }

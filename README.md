@@ -103,14 +103,14 @@ fn write_string(port_info: &mut PortInfo) {
 }
 ```
 
-## Connecting to a com port, and reading data
+## Connecting to a com port, and echoing data
 
 This example connects to a com port at 115_200 baud, and starts the asynchronous read handler.
 
 This handler will call the callback when new data is received. It passes not just the new data, but all data received
 since the com port was opened. The return value of the callback specifies to drain N elements starting from index 0.
 
-In this example, the callback drains the entire read buffer after printing its contents.
+In this example, the callback drains the entire read buffer after echoing its contents back to the port.
 
 ```rust
 fn read_async(port_info: &mut PortInfo) {
@@ -139,7 +139,14 @@ fn serial_read_handler(identifier: usize, data: &[u8]) -> usize {
     use alloc::string::String;
     println!("Serial Read on {identifier}: {:?} | {}", data, String::from_utf8_lossy(&data));
 
+    let mutex_ptr = GlobalPorts::get_port(identifier).unwrap();
+    let port_locked = unsafe { (*mutex_ptr).lock().unwrap() };
+
+    match port_locked.write_blocking(data) {
+        Ok(len) => dbg_println!("Wrote {len} bytes"),
+        Err(e) => dbg_println!("Failed to write any data: {:?}", e),
+    }
+
     data.len()
 }
-
 ```

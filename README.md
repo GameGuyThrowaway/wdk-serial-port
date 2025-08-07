@@ -107,7 +107,7 @@ fn write_string(port_info: &mut PortInfo) {
 
 This example connects to a com port at 115_200 baud, and starts the asynchronous read handler.
 
-This handler will call the callback when new data is received. It passes not only the new data, but all data received
+This handler will call the callback when new data is received. It passes not just the new data, but all data received
 since the com port was opened. The return value of the callback specifies to drain N elements starting from index 0.
 
 In this example, the callback drains the entire read buffer after printing its contents.
@@ -135,9 +135,9 @@ fn read_async(port_info: &mut PortInfo) {
     }
 }
 
-fn serial_read_handler(data: &[u8]) -> usize {
+fn serial_read_handler(identifier: usize, data: &[u8]) -> usize {
     use alloc::string::String;
-    println!("Serial Read: {:?} | {}", data, String::from_utf8_lossy(&data));
+    println!("Serial Read on {identifier}: {:?} | {}", data, String::from_utf8_lossy(&data));
 
     data.len()
 }

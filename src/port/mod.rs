@@ -830,6 +830,8 @@ impl Port {
 ///
 /// # Arguments
 ///
+/// * `identifier` - The serial port's identifier, telling the callback which
+///   serial port the read came from.
 /// * `data` - The serial port's data buffer, showing the total data read.
 ///
 /// # Return value:
@@ -838,7 +840,7 @@ impl Port {
 /// serial port's data buffer, shifting the buffer left by `amount` bytes. The
 /// buffer's new 0th index will become data[amount].
 ///
-type AsyncReadCallback = fn(data: &[u8]) -> usize;
+type AsyncReadCallback = fn(identifier: usize, data: &[u8]) -> usize;
 
 ///
 /// `rxchar_callback` is the completion routine for the RXCHAR WAIT_ON_MASK
@@ -894,10 +896,9 @@ fn rxchar_callback(port: *mut KMutex<Port>, status: NTSTATUS, data: &[u8]) {
 
         if let Ok(_) = port.read_blocking(bytes_available) {
             let read_callback = &port.async_read_callback.unwrap();
-            let to_delete = read_callback(&port.read_buffer);
-
-            let to_delete = to_delete.min(port.read_buffer.len());
-            port.read_buffer.drain(0..to_delete);
+            let to_delete = read_callback(port.identifier.unwrap(), &port.read_buffer);
+            let end_idx = to_delete.min(port.read_buffer.len());
+            port.read_buffer.drain(0..end_idx);
         }
     }
 }

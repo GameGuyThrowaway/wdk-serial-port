@@ -52,11 +52,11 @@ most concurrency, wdk-mutex.
       what to look out for, and how systems behave in the Windows kernel.
     * I don't recommend this for use in production environments until further analysis is done.
 
-## Examples
+# Examples
 
 TODO: Link the Ferrum driver once it is published.
 
-### Printing all available com ports' paths on the system
+## Printing all available com ports' paths on the system
 
 ```rust
 fn list_ports() {
@@ -73,7 +73,7 @@ fn list_ports() {
 }
 ```
 
-### Connecting to a com port, and writing data to it
+## Connecting to a com port, and writing data to it
 
 This example opens a com port at 115_200 baud, sends "Hello World\n" to it, and then closes it.
 
@@ -103,7 +103,7 @@ fn write_string(port_info: &mut PortInfo) {
 }
 ```
 
-### Connecting to a com port, and reading data
+## Connecting to a com port, and reading data
 
 This example connects to a com port at 115_200 baud, and starts the asynchronous read handler.
 
@@ -141,4 +141,5 @@ fn serial_read_handler(data: &[u8]) -> usize {
 
     data.len()
 }
+
 ```

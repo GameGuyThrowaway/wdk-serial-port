@@ -12,9 +12,8 @@ use wdk_alloc::WdkAllocator;
 use wdk_mutex::kmutex::KMutex;
 use wdk_sys::{
     ntddk::{
-        IoBuildDeviceIoControlRequest,
-        IoBuildSynchronousFsdRequest, IoSetCompletionRoutineEx, IofCallDriver, KeInitializeEvent,
-        KeWaitForSingleObject, ObfDereferenceObject, ZwClose,
+        IoBuildDeviceIoControlRequest, IoBuildSynchronousFsdRequest, IoSetCompletionRoutineEx,
+        IofCallDriver, KeInitializeEvent, KeWaitForSingleObject, ObfDereferenceObject, ZwClose,
     },
     DO_DIRECT_IO, HANDLE, IO_STATUS_BLOCK, IRP_MJ_READ, IRP_MJ_WRITE, KEVENT, NTSTATUS,
     PDEVICE_OBJECT, PFILE_OBJECT, STATUS_PENDING, STATUS_SUCCESS, _DEVICE_OBJECT,
@@ -58,12 +57,12 @@ impl GlobalPorts {
     ///
     /// Returns None if the port couldn't be inserted.
     ///
-    fn add_port(port: *mut KMutex<Port>) -> Option<usize> {
-        for identifier in 0..MAX_OPEN_PORTS {
-            let ptr = OPEN_PORTS[identifier].load(PORT_ORDERING);
+    fn add_port(port: *mut KMutex<Port>) -> Option<PortIdentifier> {
+        for port_idx in 0..MAX_OPEN_PORTS {
+            let ptr = OPEN_PORTS[port_idx].load(PORT_ORDERING);
             if ptr.is_null() {
-                OPEN_PORTS[identifier].store(port, PORT_ORDERING);
-                return Some(identifier);
+                OPEN_PORTS[port_idx].store(port, PORT_ORDERING);
+                return Some(PortIdentifier::from_port_idx(port_idx));
             }
         }
         None
@@ -75,12 +74,12 @@ impl GlobalPorts {
     /// Returns a pointer to the port's mutex. Returns None if it cannot be
     /// found. If Some is returned, the pointer is guaranteed to be non null.
     ///
-    pub fn get_port(identifier: usize) -> Option<*mut KMutex<Port>> {
-        if identifier >= MAX_OPEN_PORTS {
+    pub fn get_port(id: PortIdentifier) -> Option<*mut KMutex<Port>> {
+        if id.port_idx >= MAX_OPEN_PORTS {
             return None;
         }
 
-        let port = OPEN_PORTS[identifier].load(PORT_ORDERING);
+        let port = OPEN_PORTS[id.port_idx].load(PORT_ORDERING);
         if port.is_null() {
             return None;
         }
@@ -94,9 +93,13 @@ impl GlobalPorts {
     /// TODO: Should I add a status return in case the port wasn't found or
     /// couldn't be locked?
     ///
-    pub fn close_port(identifier: usize) {
+    pub fn close_port(identifier: PortIdentifier) {
+        if identifier.port_idx >= MAX_OPEN_PORTS {
+            return;
+        }
+
         if let Some(mutex_ptr) = GlobalPorts::get_port(identifier) {
-            OPEN_PORTS[identifier].store(null_mut(), PORT_ORDERING);
+            OPEN_PORTS[identifier.port_idx].store(null_mut(), PORT_ORDERING);
             let mutex = unsafe { &*mutex_ptr };
             let port = mutex.lock().unwrap();
             port.close();
@@ -109,9 +112,38 @@ impl GlobalPorts {
     /// exiting.
     ///
     pub fn close_all_ports() {
-        for identifier in 0..MAX_OPEN_PORTS {
-            GlobalPorts::close_port(identifier);
+        for idx in 0..MAX_OPEN_PORTS {
+            GlobalPorts::close_port(PortIdentifier::from_port_idx(idx));
         }
+    }
+}
+
+///
+/// Holds the key to access ports via GlobalPorts::get_port. This identifier
+/// is unique to each Port, easily comparable, and easily copyable.
+///
+/// ASIDE:
+///
+/// This data structure can likely be removed if the method of safe concurrency
+/// is changed (if `OPEN_PORTS`) is removed.
+///
+/// Technically GlobalPorts and PortIdentifier could be represented as traits
+/// with implementations, however given their limited and coupled uses, that
+/// seems unnecessarily complex.
+///
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct PortIdentifier {
+    /// The underlying data used to identify and reference a port. This is used
+    /// for this specific GlobalPorts implementation.
+    port_idx: usize,
+}
+
+impl PortIdentifier {
+    ///
+    /// Creates a new PortIdentifier from the underlying identifier data.
+    ///
+    fn from_port_idx(port_idx: usize) -> Self {
+        Self { port_idx }
     }
 }
 
@@ -137,10 +169,10 @@ pub struct Port {
     /// This buffer basically holds context for when the callback can't entirely
     /// finish processing.
     read_buffer: Vec<u8>,
-    /// An identifier used to retrieve the port in a thread safe manner from the
-    /// global open port array. This value should always be Some(usize), outside
-    /// of construction.
-    identifier: Option<usize>,
+    /// An identifier used to retrieve the port from the GlobalPorts manager.
+    /// This value should always be Some(PortIdentifier), outside of
+    /// construction.
+    identifier: Option<PortIdentifier>,
 }
 
 /// Start the read buffer at a capacity big enough for 99% of transfers.
@@ -157,9 +189,9 @@ impl Port {
     ///
     /// `new` is a constructor for a Port instance. It automatically inits the
     /// port after construction, prior to returning, using the provided baud
-    /// rate. Also puts the port in a mutex, and in the global port array, for
+    /// rate. Also puts the port in a mutex, and in the GlobalPorts manager, for
     /// safe support of the async features. Returns the identifier needed to
-    /// retrieve a specific port from the global port array.
+    /// retrieve a specific port from the GlobalPorts manager.
     ///
     /// # Arguments
     ///
@@ -170,7 +202,7 @@ impl Port {
     ///
     /// # Return value:
     ///
-    /// * `Some(usize)` - The port identifier, upon success.
+    /// * `Some(PortIdentifier)` - The port identifier, upon success.
     /// * `Err(NewPortErr)` - Otherwise.
     ///
     pub fn new(
@@ -178,7 +210,7 @@ impl Port {
         file_object: PFILE_OBJECT,
         file_handle: HANDLE,
         baud_rate: u32,
-    ) -> Result<usize, NewPortErr> {
+    ) -> Result<PortIdentifier, NewPortErr> {
         let port = Self {
             device_object,
             file_object,
@@ -193,7 +225,7 @@ impl Port {
         let mutex_ptr = Box::into_raw(mutex);
 
         if let Some(identifier) = GlobalPorts::add_port(mutex_ptr) {
-            let mutex_ptr = OPEN_PORTS[identifier].load(PORT_ORDERING);
+            let mutex_ptr = GlobalPorts::get_port(identifier).unwrap();
             if mutex_ptr.is_null() {
                 // impossible in theory
                 return Err(NewPortErr::FailedToAddToPortArray);
@@ -840,7 +872,7 @@ impl Port {
 /// serial port's data buffer, shifting the buffer left by `amount` bytes. The
 /// buffer's new 0th index will become data[amount].
 ///
-type AsyncReadCallback = fn(identifier: usize, data: &[u8]) -> usize;
+type AsyncReadCallback = fn(identifier: PortIdentifier, data: &[u8]) -> usize;
 
 ///
 /// `rxchar_callback` is the completion routine for the RXCHAR WAIT_ON_MASK
@@ -915,7 +947,7 @@ type AsyncIOCTLCallback = fn(port: *mut KMutex<Port>, status: NTSTATUS, data: &[
 ///
 struct AsyncIOCTLContext {
     /// The identifier for the port the IOCTL was sent on.
-    identifier: usize,
+    identifier: PortIdentifier,
     /// A pointer to the WdkAllocator allocated IO_STATUS_BLOCK used by the
     /// IOCTL. Deallocated in completion routine so that lifetime is correct.
     io_status: *mut IO_STATUS_BLOCK,
@@ -958,8 +990,7 @@ unsafe extern "C" fn async_ioctl_completion_routine(
             WdkAllocator.dealloc((*context).io_status as *mut _, DEALLOC_LAYOUT);
             WdkAllocator.dealloc((*context).input_data as *mut _, DEALLOC_LAYOUT);
 
-            let port = OPEN_PORTS[(*context).identifier].load(PORT_ORDERING);
-
+            let port = GlobalPorts::get_port((*context).identifier).unwrap();
             if !port.is_null() {
                 if let Some(callback) = (*context).completion_routine {
                     let status = (*irp).IoStatus.__bindgen_anon_1.Status;

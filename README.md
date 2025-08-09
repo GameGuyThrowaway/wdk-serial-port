@@ -41,9 +41,6 @@ most concurrency, wdk-mutex.
 * Currently there is a fixed limit on the number of opened com ports at once.
     * This is because of the nature of the memory safety, and using global mutex pointers to handle multi threaded
       access to serial ports.
-* Accessing a com port after opening it is tedious.
-    * Users get passed an `identifier` (an index into the global mutex list), and must use the `GlobalPorts` system to
-      fetch access or close the port.
 * There is no automated testing of this code.
     * However I don't see much room for unit tests, and integration/system tests would either be very complex with an
       actual serial port, or presumably not very useful with a mock serial port.
@@ -116,7 +113,7 @@ In this example, the callback drains the entire read buffer after echoing its co
 fn read_async(port_info: &mut PortInfo) {
     match port_info.open(115_200) {
         Ok(identifier) => {
-            println!("Port Opening @ {identifier}");
+            println!("Port Opening @");
 
             let mutex_ptr = GlobalPorts::get_port(identifier).unwrap();
             let mut port_locked = unsafe { (*mutex_ptr).lock().unwrap() };
@@ -135,9 +132,9 @@ fn read_async(port_info: &mut PortInfo) {
     }
 }
 
-fn serial_read_handler(identifier: usize, data: &[u8]) -> usize {
+fn serial_read_handler(identifier: PortIdentifier, data: &[u8]) -> usize {
     use alloc::string::String;
-    println!("Serial Read on {identifier}: {:?} | {}", data, String::from_utf8_lossy(&data));
+    println!("Serial Read: {:?} | {}", data, String::from_utf8_lossy(&data));
 
     let mutex_ptr = GlobalPorts::get_port(identifier).unwrap();
     let port_locked = unsafe { (*mutex_ptr).lock().unwrap() };

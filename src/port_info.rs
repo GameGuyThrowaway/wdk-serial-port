@@ -25,7 +25,7 @@ use wdk_sys::{
 };
 
 use crate::{
-    port::{NewPortErr, Port},
+    port::{NewPortErr, Port, PortIdentifier},
     DEALLOC_LAYOUT,
 };
 
@@ -189,10 +189,10 @@ impl PortInfo {
     ///
     /// # Return value:
     ///
-    /// * `Ok(usize)` - The port identifier, if successful
+    /// * `Ok(PortIdentifier)` - The port identifier, if successful
     /// * `Err(OpenPortErr)` - Otherwise
     ///
-    pub fn open(&mut self, baud_rate: u32) -> Result<usize, OpenPortErr> {
+    pub fn open(&mut self, baud_rate: u32) -> Result<PortIdentifier, OpenPortErr> {
         let mut attributes = OBJECT_ATTRIBUTES {
             Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
             ObjectName: &mut self.unicode_path,

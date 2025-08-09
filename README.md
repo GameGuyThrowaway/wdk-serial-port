@@ -1,11 +1,11 @@
 
-# wdk-serialport
+# wdk-serial-port
 
 A Rust based serial port interface library for my Ferrum Windows kernel driver development.
 
 To install this crate:
 ```
-cargo add wdk-serialport --git https://github.com/GameGuyThrowaway/wdk-serialport.git
+cargo add wdk-serial-port --git https://github.com/GameGuyThrowaway/wdk-serial-port.git
 ```
 
 This crate gives easy access to serial ports from a KMDF driver. It lets users list serial ports, open serial ports with
@@ -60,7 +60,7 @@ TODO: Link the Ferrum driver once it is published.
 
 ```rust
 fn list_ports() {
-    match wdk_serialport::list_ports() {
+    match wdk_serial_port::list_ports() {
         Ok(ports) => {
             for mut port_info in ports {
                 println!("Found Port @ `{}`", port_info.path);

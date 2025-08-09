@@ -1,9 +1,10 @@
 [package]
-name = "wdk-serialport"
+name = "wdk-serial-port"
 version = "0.1.0"
 edition = "2021"
 authors = ["GameGuyThrowaway"]
-repository = "https://github.com/GameGuyThrowaway/wdk-serialport"
+repository = "https://github.com/GameGuyThrowaway/wdk-serial-port"
+readme = "README.md"
 description = "A serial port interface library for my Ferrum Windows kernel driver development."
 
 [package.metadata.wdk.driver-model]

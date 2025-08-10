@@ -17,6 +17,7 @@ use wdk_sys::{
     GUID, NTSTATUS, PDEVICE_OBJECT, PZZWSTR,
 };
 
+mod misc;
 pub mod port;
 pub mod port_info;
 

@@ -12,15 +12,9 @@ use wdk_alloc::WdkAllocator;
 use wdk_mutex::kmutex::KMutex;
 use wdk_sys::{
     ntddk::{
-        IoBuildDeviceIoControlRequest, IoBuildSynchronousFsdRequest, IoSetCompletionRoutineEx,
-        IofCallDriver, KeInitializeEvent, KeWaitForSingleObject, ObfDereferenceObject, ZwClose,
-    },
-    DO_DIRECT_IO, HANDLE, IO_STATUS_BLOCK, IRP_MJ_READ, IRP_MJ_WRITE, KEVENT, NTSTATUS,
-    PDEVICE_OBJECT, PFILE_OBJECT, STATUS_PENDING, STATUS_SUCCESS, _DEVICE_OBJECT,
-    _EVENT_TYPE::NotificationEvent,
-    _IRP,
-    _KWAIT_REASON::Executive,
-    _MODE::KernelMode,
+        IoBuildDeviceIoControlRequest, IoBuildSynchronousFsdRequest, IofCallDriver,
+        KeInitializeEvent, KeWaitForSingleObject, ObfDereferenceObject, ZwClose,
+    }, BOOLEAN, DO_DIRECT_IO, HANDLE, IO_STATUS_BLOCK, IRP_MJ_READ, IRP_MJ_WRITE, KEVENT, NTSTATUS, PDEVICE_OBJECT, PFILE_OBJECT, STATUS_PENDING, STATUS_SUCCESS, _DEVICE_OBJECT, _EVENT_TYPE::NotificationEvent, _IRP, _KWAIT_REASON::Executive, _MODE::KernelMode
 };
 
 use ioctl::{
@@ -31,7 +25,7 @@ use ioctl::{
     SERIAL_LINE_CONTROL, SERIAL_RTS_CONTROL, SERIAL_STATUS, SERIAL_TIMEOUTS, SERIAL_XOFF_CONTINUE,
 };
 
-use crate::DEALLOC_LAYOUT;
+use crate::{misc::IoSetCompletionRoutine, DEALLOC_LAYOUT};
 
 mod ioctl;
 
@@ -279,8 +273,6 @@ pub enum SendIRPErr {
     FailedToCloneData,
     FailedToCreateIoStatus,
     FailedToCreateContext,
-    #[allow(dead_code)]
-    FailedToSetCompletionRoutine(NTSTATUS),
 }
 
 impl Port {
@@ -662,33 +654,18 @@ impl Port {
         }
 
         // SAFETY: This is safe because:
-        //         1. `device_object` is a pointer to a valid DEVICE_OBJECT.
-        //         2. `irp` is a pointer to a valid IRP.
-        //         3. `completion_routine` is either None, or contains a
+        //         1. `irp` is a valid pointer to a valid IRP.
+        //         2. `CompletionRoutine` is either None, or contains a
         //            guaranteed safe function.
-        let status = unsafe {
-            IoSetCompletionRoutineEx(
-                self.device_object,
+        unsafe {
+            IoSetCompletionRoutine(
                 irp,
                 Some(async_ioctl_completion_routine),
                 context as *mut _,
-                true as u8,
-                true as u8,
-                true as u8,
-            )
-        };
-        if !nt_success(status) {
-            // SAFETY: This is safe because:
-            //         1. `io_status` is a valid WdkAllocator allocated pool,
-            //            with no dangling pointers.
-            //         2. `data_clone` is a valid WdkAllocator allocated pool,
-            //            with no dangling pointers.
-            unsafe {
-                WdkAllocator.dealloc(io_status as *mut _, DEALLOC_LAYOUT);
-                WdkAllocator.dealloc(data_clone, DEALLOC_LAYOUT);
-                WdkAllocator.dealloc(context as *mut _, DEALLOC_LAYOUT);
-            }
-            return Err(SendIRPErr::FailedToSetCompletionRoutine(status));
+                true as BOOLEAN,
+                true as BOOLEAN,
+                true as BOOLEAN,
+            );
         }
 
         // SAFETY: This is safe because:

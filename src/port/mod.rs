@@ -14,7 +14,13 @@ use wdk_sys::{
     ntddk::{
         IoBuildDeviceIoControlRequest, IoBuildSynchronousFsdRequest, IofCallDriver,
         KeInitializeEvent, KeWaitForSingleObject, ObfDereferenceObject, ZwClose,
-    }, BOOLEAN, DO_DIRECT_IO, HANDLE, IO_STATUS_BLOCK, IRP_MJ_READ, IRP_MJ_WRITE, KEVENT, NTSTATUS, PDEVICE_OBJECT, PFILE_OBJECT, STATUS_PENDING, STATUS_SUCCESS, _DEVICE_OBJECT, _EVENT_TYPE::NotificationEvent, _IRP, _KWAIT_REASON::Executive, _MODE::KernelMode
+    },
+    BOOLEAN, DO_DIRECT_IO, HANDLE, IO_STATUS_BLOCK, IRP_MJ_READ, IRP_MJ_WRITE, KEVENT, NTSTATUS,
+    PDEVICE_OBJECT, PFILE_OBJECT, STATUS_PENDING, STATUS_SUCCESS, _DEVICE_OBJECT,
+    _EVENT_TYPE::NotificationEvent,
+    _IRP,
+    _KWAIT_REASON::Executive,
+    _MODE::KernelMode,
 };
 
 use ioctl::{
@@ -976,7 +982,8 @@ unsafe extern "C" fn async_ioctl_completion_routine(
                         if !device_object.is_null()
                             && ((*device_object).Flags & DO_DIRECT_IO) == DO_DIRECT_IO
                         {
-                            (*irp).MdlAddress as *mut u8
+                            todo!()
+                            // (*irp).MdlAddress as *mut u8
                         } else {
                             (*irp).AssociatedIrp.SystemBuffer as *mut u8
                         }

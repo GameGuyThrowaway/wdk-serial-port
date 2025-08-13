@@ -125,7 +125,7 @@ impl GlobalPorts {
 /// with implementations, however given their limited and coupled uses, that
 /// seems unnecessarily complex.
 ///
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct PortIdentifier {
     /// The underlying data used to identify and reference a port. This is used
     /// for this specific GlobalPorts implementation.

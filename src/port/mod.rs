@@ -950,57 +950,70 @@ struct AsyncIOCTLContext {
 unsafe extern "C" fn async_ioctl_completion_routine(
     device_object: *mut _DEVICE_OBJECT,
     irp: *mut _IRP,
-    context: *mut c_void,
+    context_ptr: *mut c_void,
 ) -> NTSTATUS {
-    if !context.is_null() && !irp.is_null() {
-        let context = context as *mut AsyncIOCTLContext;
-        // SAFETY: This is safe because:
-        //         1. `context` is guaranteed to be a non null pointer to a
-        //            valid AsyncIOCTLContext object.
-        //         2. `irp` is guaranteed to be a non null pointer to a valid
-        //            IRP.
-        //         3. `device_object` is verified as a non null pointer, and
-        //            thus a valid DEVICE_OBJECT before dereferencing.
-        //         4. `input_data` is guaranteed to have been already used and
-        //            no longer referenced by the IOCTL.
-        //         5. `io_status` is assumed (TODO) to be no longer referenced,
-        //            as the IOCTL is presumed complete. However I have some
-        //            uncertainties about this, as I found that the passed
-        //            output buffer was consistently not written until after the
-        //            completion routine was called. Similarly, I found that the
-        //            io_status didn't match in value to IRP.IoStatus.
-        unsafe {
-            WdkAllocator.dealloc((*context).io_status as *mut _, DEALLOC_LAYOUT);
-            WdkAllocator.dealloc((*context).input_data as *mut _, DEALLOC_LAYOUT);
+    if context_ptr.is_null() || irp.is_null() {
+        // invariant violated
+        return STATUS_SUCCESS;
+    }
 
-            let port = GlobalPorts::get_port((*context).identifier).unwrap();
-            if !port.is_null() {
-                if let Some(callback) = (*context).completion_routine {
-                    let status = (*irp).IoStatus.__bindgen_anon_1.Status;
-                    let bytes_read = (*irp).IoStatus.Information as usize;
-                    let raw_data = {
-                        if !device_object.is_null()
-                            && ((*device_object).Flags & DO_DIRECT_IO) == DO_DIRECT_IO
-                        {
-                            todo!()
-                            // (*irp).MdlAddress as *mut u8
-                        } else {
-                            (*irp).AssociatedIrp.SystemBuffer as *mut u8
-                        }
-                    };
+    // SAFETY: This is safe because:
+    //         1. `context_ptr` is a non null AsyncIOCTLContext pointer, as
+    //            guaranteed by the invariant held with `send_ioctl_async`.
+    let context = unsafe { &mut *(context_ptr as *mut AsyncIOCTLContext) };
+    // SAFETY: This is safe because:
+    //         1. `irp` is a non null IRP pointer.
+    let irp = unsafe { &*irp };
 
-                    let mut data = Vec::with_capacity(bytes_read);
-                    if !raw_data.is_null() {
-                        let slice = slice::from_raw_parts(raw_data, bytes_read);
-                        data.extend_from_slice(slice);
-                    }
+    // SAFETY: This is safe because:
+    //         1. `io_status` and `input_data` are WdkAllocator allocated
+    //            structures, as defined by the function invariant held with
+    //            `send_ioctl_async`.
+    unsafe {
+        WdkAllocator.dealloc(context.io_status as *mut _, DEALLOC_LAYOUT);
+        WdkAllocator.dealloc(context.input_data as *mut _, DEALLOC_LAYOUT);
+    }
 
-                    callback(port, status, &data);
+    if let Some(port) = GlobalPorts::get_port(context.identifier) {
+        if let Some(callback) = context.completion_routine {
+            // SFAETY: This is safe because:
+            //         `Status` is interpreted as an i32, and not as a dangerous
+            //         type like a raw pointer.
+            let status = unsafe {
+                irp.IoStatus.__bindgen_anon_1.Status
+            };
+            let bytes_read = irp.IoStatus.Information as usize;
+            // SAFETY: This is safe because:
+            //         `device_object` is only derefrenced after verifying it to
+            //         be a valid pointer.
+            let raw_data = unsafe {
+                if !device_object.is_null()
+                    && ((*device_object).Flags & DO_DIRECT_IO) == DO_DIRECT_IO
+                {
+                    todo!()
+                    // irp.MdlAddress as *mut u8
+                } else {
+                    irp.AssociatedIrp.SystemBuffer as *mut u8
                 }
+            };
+
+            let mut data = Vec::with_capacity(bytes_read);
+            if !raw_data.is_null() {
+                let slice = slice::from_raw_parts(raw_data, bytes_read);
+                data.extend_from_slice(slice);
             }
 
-            WdkAllocator.dealloc(context as *mut _, DEALLOC_LAYOUT);
+            callback(port, status, &data);
         }
     }
+
+    // SAFETY: This is safe because:
+    //         1. `context_ptr` is a WdkAllocator allocated structure, as
+    //            defined by the function invariant held with
+    //            `send_ioctl_async`.
+    unsafe {
+        WdkAllocator.dealloc(context_ptr as *mut _, DEALLOC_LAYOUT);
+    }
+
     STATUS_SUCCESS
 }

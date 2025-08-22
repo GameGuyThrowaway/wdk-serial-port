@@ -8,9 +8,9 @@ readme = "README.md"
 description = "A serial port interface library for my Ferrum Windows kernel driver development."
 
 [dependencies]
-wdk = ">=0.3.1"
-wdk-alloc = ">=0.3.1"
-wdk-sys = ">=0.4.0"
+wdk = { git = "https://github.com/GameGuyThrowaway/windows-drivers-rs.git", branch = "wsk-bindings" }
+wdk-sys = { git = "https://github.com/GameGuyThrowaway/windows-drivers-rs.git", branch = "wsk-bindings" }
+wdk-alloc = { git = "https://github.com/GameGuyThrowaway/windows-drivers-rs.git", branch = "wsk-bindings" }
 wdk-mutex = { git = "https://github.com/GameGuyThrowaway/wdk-mutex.git" }
 
 [profile.dev]

@@ -76,16 +76,16 @@ This example opens a com port at 115_200 baud, sends "Hello World\n" to it, and 
 
 ```rust
 use wdk_serial_port::{
-    port::GlobalPorts,
-    port_info::PortInfo
+    port::GlobalSerialPorts,
+    port_info::SerialPortInfo
 };
 
-fn write_string(port_info: &mut PortInfo) {
+fn write_string(port_info: &mut SerialPortInfo) {
     match port_info.open(115_200) {
         Ok(identifier) => {
             println!("Port Opening @ {identifier}");
 
-            let mutex_ptr = GlobalPorts::get_port(identifier).unwrap();
+            let mutex_ptr = GlobalSerialPorts::get_port(identifier).unwrap();
             let mut port_locked = unsafe { (*mutex_ptr).lock().unwrap() };
 
             match port_locked.write_blocking(b"Hello World\n") {
@@ -95,7 +95,7 @@ fn write_string(port_info: &mut PortInfo) {
                 Err(e) => println!("Failed to write any data: {:?}", e),
             }
 
-            GlobalPorts::close_port(identifier);
+            GlobalSerialPorts::close_port(identifier);
             println!("Port Closed");
         }
         Err(err) => {
@@ -116,16 +116,16 @@ In this example, the callback drains the entire read buffer after echoing its co
 
 ```rust
 use wdk_serial_port::{
-    port::{GlobalPorts, Port},
-    port_info::PortInfo
+    port::{GlobalSerialPorts, SerialPortInfo, SerialPort},
+    port_info::SerialPortInfo
 };
 
-fn read_async(port_info: &mut PortInfo) {
+fn read_async(port_info: &mut SerialPortInfo) {
     match port_info.open(115_200) {
         Ok(identifier) => {
             println!("Port Opening @");
 
-            let mutex_ptr = GlobalPorts::get_port(identifier).unwrap();
+            let mutex_ptr = GlobalSerialPorts::get_port(identifier).unwrap();
             let mut port_locked = unsafe { (*mutex_ptr).lock().unwrap() };
 
             match port_locked.start_async_read_system(serial_read_handler) {
@@ -134,7 +134,7 @@ fn read_async(port_info: &mut PortInfo) {
             }
 
             // Don't close the port until you're done reading.
-            // GlobalPorts::close_port(identifier);
+            // GlobalSerialPorts::close_port(identifier);
         }
         Err(err) => {
             println!("Failed to Open Port: {:?}", err);
@@ -142,11 +142,11 @@ fn read_async(port_info: &mut PortInfo) {
     }
 }
 
-fn serial_read_handler(port: &KMutex<'_, Port>, data: &[u8]) -> usize {
+fn serial_read_handler(port: &KMutex<'_, SerialPort>, data: &[u8]) -> usize {
     use alloc::string::String;
     println!("Serial Read: {:?} | {}", data, String::from_utf8_lossy(&data));
 
-    let mutex_ptr = GlobalPorts::get_port(identifier).unwrap();
+    let mutex_ptr = GlobalSerialPorts::get_port(identifier).unwrap();
     let port_locked = unsafe { (*mutex_ptr).lock().unwrap() };
 
     match port_locked.write_blocking(data) {

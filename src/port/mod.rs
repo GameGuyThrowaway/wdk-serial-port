@@ -30,7 +30,7 @@ mod ioctl;
 /// One for keyboard, one for mouse, one for com0com, and 2 extras.
 const MAX_OPEN_PORTS: usize = 5;
 /// A global array of open ports, used for thread safe access to ports.
-static OPEN_PORTS: [AtomicPtr<KMutex<Port>>; MAX_OPEN_PORTS] = [
+static OPEN_PORTS: [AtomicPtr<KMutex<SerialPort>>; MAX_OPEN_PORTS] = [
     AtomicPtr::new(null_mut()),
     AtomicPtr::new(null_mut()),
     AtomicPtr::new(null_mut()),
@@ -40,21 +40,21 @@ static OPEN_PORTS: [AtomicPtr<KMutex<Port>>; MAX_OPEN_PORTS] = [
 /// The ordering to use when loading/storing in the OPEN_PORTS array.
 const PORT_ORDERING: Ordering = Ordering::SeqCst;
 
-pub struct GlobalPorts {}
+pub struct GlobalSerialPorts {}
 
-impl GlobalPorts {
+impl GlobalSerialPorts {
     ///
     /// Finds the next available atomic ptr for use, and inserts the data at that
     /// place, returning the place's identifier.
     ///
     /// Returns None if the port couldn't be inserted.
     ///
-    fn add_port(port: *mut KMutex<Port>) -> Option<PortIdentifier> {
+    fn add_port(port: *mut KMutex<SerialPort>) -> Option<SerialPortIdentifier> {
         for port_idx in 0..MAX_OPEN_PORTS {
             let ptr = OPEN_PORTS[port_idx].load(PORT_ORDERING);
             if ptr.is_null() {
                 OPEN_PORTS[port_idx].store(port, PORT_ORDERING);
-                return Some(PortIdentifier::from_port_idx(port_idx));
+                return Some(SerialPortIdentifier::from_port_idx(port_idx));
             }
         }
         None
@@ -66,7 +66,7 @@ impl GlobalPorts {
     /// Returns a pointer to the port's mutex. Returns None if it cannot be
     /// found. If Some is returned, the pointer is guaranteed to be non null.
     ///
-    pub fn get_port(id: PortIdentifier) -> Option<*mut KMutex<Port>> {
+    pub fn get_port(id: SerialPortIdentifier) -> Option<*mut KMutex<SerialPort>> {
         if id.port_idx >= MAX_OPEN_PORTS {
             return None;
         }
@@ -85,12 +85,12 @@ impl GlobalPorts {
     /// TODO: Should I add a status return in case the port wasn't found or
     /// couldn't be locked?
     ///
-    pub fn close_port(identifier: PortIdentifier) {
+    pub fn close_port(identifier: SerialPortIdentifier) {
         if identifier.port_idx >= MAX_OPEN_PORTS {
             return;
         }
 
-        if let Some(mutex_ptr) = GlobalPorts::get_port(identifier) {
+        if let Some(mutex_ptr) = GlobalSerialPorts::get_port(identifier) {
             OPEN_PORTS[identifier.port_idx].store(null_mut(), PORT_ORDERING);
             let mutex = unsafe { &*mutex_ptr };
             let port = mutex.lock().unwrap();
@@ -105,34 +105,35 @@ impl GlobalPorts {
     ///
     pub fn close_all_ports() {
         for idx in 0..MAX_OPEN_PORTS {
-            GlobalPorts::close_port(PortIdentifier::from_port_idx(idx));
+            GlobalSerialPorts::close_port(SerialPortIdentifier::from_port_idx(idx));
         }
     }
 }
 
 ///
-/// Holds the key to access ports via GlobalPorts::get_port. This identifier
-/// is unique to each Port, easily comparable, and easily copyable.
+/// Holds the key to access ports via GlobalSerialPorts::get_port. This
+/// identifier is unique to each SerialPort, easily comparable, and easily
+/// copyable.
 ///
 /// ASIDE:
 ///
 /// This data structure can likely be removed if the method of safe concurrency
 /// is changed (if `OPEN_PORTS`) is removed.
 ///
-/// Technically GlobalPorts and PortIdentifier could be represented as traits
-/// with implementations, however given their limited and coupled uses, that
-/// seems unnecessarily complex.
+/// Technically GlobalSerialPorts and SerialPortIdentifier could be represented
+/// as traits with implementations, however given their limited and coupled
+/// uses, that seems unnecessarily complex.
 ///
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct PortIdentifier {
+pub struct SerialPortIdentifier {
     /// The underlying data used to identify and reference a port. This is used
-    /// for this specific GlobalPorts implementation.
+    /// for this specific GlobalSerialPorts implementation.
     port_idx: usize,
 }
 
-impl PortIdentifier {
+impl SerialPortIdentifier {
     ///
-    /// Creates a new PortIdentifier from the underlying identifier data.
+    /// Creates a new SerialPortIdentifier from the underlying identifier data.
     ///
     fn from_port_idx(port_idx: usize) -> Self {
         Self { port_idx }
@@ -143,7 +144,7 @@ impl PortIdentifier {
 /// Represents an opened port, and any underlying data necessary to use the
 /// port.
 ///
-pub struct Port {
+pub struct SerialPort {
     /// Must be a pointer to a valid DEVICE_OBJECT.
     device_object: PDEVICE_OBJECT,
     /// Must be a pointer to a valid FILE_OBJECT.
@@ -161,29 +162,29 @@ pub struct Port {
     /// This buffer basically holds context for when the callback can't entirely
     /// finish processing.
     read_buffer: Vec<u8>,
-    /// An identifier used to retrieve the port from the GlobalPorts manager.
-    /// This value should always be Some(PortIdentifier), outside of
-    /// construction.
-    identifier: Option<PortIdentifier>,
+    /// An identifier used to retrieve the port from the GlobalSerialPorts
+    /// manager. This value should always be Some(SerialPortIdentifier), outside
+    /// of construction.
+    identifier: Option<SerialPortIdentifier>,
 }
 
 /// Start the read buffer at a capacity big enough for 99% of transfers.
 const READ_BUFFER_CAPACITY: usize = 1024;
 
 #[derive(Debug)]
-pub enum NewPortErr {
+pub enum NewSerialPortErr {
     #[allow(dead_code)]
     FailedToInit(SendIRPErr),
-    FailedToAddToPortArray,
+    FailedToAddToSerialPortArray,
 }
 
-impl Port {
+impl SerialPort {
     ///
-    /// `new` is a constructor for a Port instance. It automatically inits the
-    /// port after construction, prior to returning, using the provided baud
-    /// rate. Also puts the port in a mutex, and in the GlobalPorts manager, for
-    /// safe support of the async features. Returns the identifier needed to
-    /// retrieve a specific port from the GlobalPorts manager.
+    /// `new` is a constructor for a SerialPort instance. It automatically inits
+    /// the port after construction, prior to returning, using the provided baud
+    /// rate. Also puts the port in a mutex, and in the GlobalSerialPorts
+    /// manager, for safe support of the async features. Returns the identifier
+    /// needed to retrieve a specific port from the GlobalSerialPorts manager.
     ///
     /// # Arguments
     ///
@@ -194,15 +195,15 @@ impl Port {
     ///
     /// # Return value:
     ///
-    /// * `Some(PortIdentifier)` - The port identifier, upon success.
-    /// * `Err(NewPortErr)` - Otherwise.
+    /// * `Some(SerialPortIdentifier)` - The port identifier, upon success.
+    /// * `Err(NewSerialPortErr)` - Otherwise.
     ///
     pub fn new(
         device_object: PDEVICE_OBJECT,
         file_object: PFILE_OBJECT,
         file_handle: HANDLE,
         baud_rate: u32,
-    ) -> Result<PortIdentifier, NewPortErr> {
+    ) -> Result<SerialPortIdentifier, NewSerialPortErr> {
         let port = Self {
             device_object,
             file_object,
@@ -216,32 +217,32 @@ impl Port {
         let mutex = Box::new(KMutex::new(port).unwrap());
         let mutex_ptr = Box::into_raw(mutex);
 
-        if let Some(identifier) = GlobalPorts::add_port(mutex_ptr) {
-            let mutex_ptr = GlobalPorts::get_port(identifier).unwrap();
+        if let Some(identifier) = GlobalSerialPorts::add_port(mutex_ptr) {
+            let mutex_ptr = GlobalSerialPorts::get_port(identifier).unwrap();
             if mutex_ptr.is_null() {
                 // impossible in theory
-                return Err(NewPortErr::FailedToAddToPortArray);
+                return Err(NewSerialPortErr::FailedToAddToSerialPortArray);
             }
 
             let mut port = unsafe { (*mutex_ptr).lock().unwrap() };
             port.identifier = Some(identifier);
             port.init(baud_rate)
-                .map_err(|e| NewPortErr::FailedToInit(e))?;
+                .map_err(|e| NewSerialPortErr::FailedToInit(e))?;
 
             Ok(identifier)
         } else {
             // SAFETY: This is safe because:
             //         `mutex_ptr` was just created via Box::into_raw.
             let _ = unsafe { Box::from_raw(mutex_ptr) };
-            Err(NewPortErr::FailedToAddToPortArray)
+            Err(NewSerialPortErr::FailedToAddToSerialPortArray)
         }
     }
 
     ///
-    /// `close` cleans up all stored data held by the Port, freeing any in use
-    /// memory. The caller is required to immediately dispose of the port after
-    /// calling this function. This function is internal, and only for use by
-    /// `GlobalPorts::close_port`.
+    /// `close` cleans up all stored data held by the SerialPort, freeing any in
+    /// use memory. The caller is required to immediately dispose of the port
+    /// after calling this function. This function is internal, and only for use
+    /// by `GlobalSerialPorts::close_port`.
     ///
     fn close(&self) {
         // SAFETY: This is safe because:
@@ -275,7 +276,7 @@ pub enum SendIRPErr {
     FailedToCreateContext,
 }
 
-impl Port {
+impl SerialPort {
     ///
     /// `write_blocking` writes some data on a port, blocking until the write
     /// completes.
@@ -287,7 +288,7 @@ impl Port {
     /// # Return value:
     ///
     /// * `Ok(usize)` - The length of data writte, if successful.
-    /// * `Err(PortWriteErr)` - Otherwise.
+    /// * `Err(SendIRPErr)` - Otherwise.
     ///
     pub fn write_blocking(&self, data: &[u8]) -> Result<usize, SendIRPErr> {
         let mut event = KEVENT::default();
@@ -367,7 +368,7 @@ impl Port {
     /// # Return value:
     ///
     /// * `Ok()` - Upon success.
-    /// * `Err(PortWriteErr)` - Otherwise.
+    /// * `Err(SendIRPErr)` - Otherwise.
     ///
     fn read_blocking(&mut self, len: usize) -> Result<(), SendIRPErr> {
         let mut event = KEVENT::default();
@@ -456,7 +457,7 @@ impl Port {
     /// # Return value:
     ///
     /// * `Ok(NTSTATUS)` - The ioctl status/response, if successful.
-    /// * `Err(PortWriteErr)` - Otherwise.
+    /// * `Err(SendIRPErr)` - Otherwise.
     ///
     fn send_ioctl_blocking(
         &self,
@@ -555,7 +556,7 @@ impl Port {
     /// # Return value:
     ///
     /// * `Ok()` - Upon success.
-    /// * `Err(PortWriteErr)` - Otherwise.
+    /// * `Err(SendIRPErr)` - Otherwise.
     ///
     fn send_ioctl_async(
         &self,
@@ -710,7 +711,7 @@ impl Port {
     /// # Return value:
     ///
     /// * `Ok()` - Upon success.
-    /// * `Err(PortWriteErr)` - Otherwise.
+    /// * `Err(SendIRPErr)` - Otherwise.
     ///
     fn init(&self, baud_rate: u32) -> Result<(), SendIRPErr> {
         self.send_ioctl_blocking(
@@ -782,7 +783,7 @@ impl Port {
     /// # Return value:
     ///
     /// * `Ok()` - Upon success.
-    /// * `Err(PortWriteErr)` - Otherwise.
+    /// * `Err(SendIRPErr)` - Otherwise.
     /// 
     /// # Details:
     ///
@@ -850,7 +851,7 @@ impl Port {
 /// serial port's data buffer, shifting the buffer left by `amount` bytes. The
 /// buffer's new 0th index will become data[amount].
 ///
-type AsyncReadCallback = fn(port: &KMutexGuard<'_, Port>, data: &[u8]) -> usize;
+type AsyncReadCallback = fn(port: &KMutexGuard<'_, SerialPort>, data: &[u8]) -> usize;
 
 ///
 /// `rxchar_callback` is the completion routine for the RXCHAR WAIT_ON_MASK
@@ -882,7 +883,7 @@ type AsyncReadCallback = fn(port: &KMutexGuard<'_, Port>, data: &[u8]) -> usize;
 /// * `status` - The status of the IOCTL request.
 /// * `data` - The output data of the IOCTL request.
 ///
-fn rxchar_callback(port: *mut KMutex<Port>, status: NTSTATUS, data: &[u8]) {
+fn rxchar_callback(port: *mut KMutex<SerialPort>, status: NTSTATUS, data: &[u8]) {
     if data.len() != 4 {
         return;
     }
@@ -925,7 +926,7 @@ fn rxchar_callback(port: *mut KMutex<Port>, status: NTSTATUS, data: &[u8]) {
 /// A completion routine, called upon an asynchronous IOCTL completing. This
 /// passes the resulting status and output data. `port` is guaranteed to be non
 /// null.
-type AsyncIOCTLCallback = fn(port: *mut KMutex<Port>, status: NTSTATUS, data: &[u8]);
+type AsyncIOCTLCallback = fn(port: *mut KMutex<SerialPort>, status: NTSTATUS, data: &[u8]);
 
 ///
 /// A structure used to hold the context of an on-going asynchronous IOCTL
@@ -934,7 +935,7 @@ type AsyncIOCTLCallback = fn(port: *mut KMutex<Port>, status: NTSTATUS, data: &[
 ///
 struct AsyncIOCTLContext {
     /// The identifier for the port the IOCTL was sent on.
-    identifier: PortIdentifier,
+    identifier: SerialPortIdentifier,
     /// A pointer to the WdkAllocator allocated IO_STATUS_BLOCK used by the
     /// IOCTL. Deallocated in completion routine so that lifetime is correct.
     io_status: PIO_STATUS_BLOCK,
@@ -1007,7 +1008,7 @@ fn async_ioctl_completion_routine(
         WdkAllocator.dealloc(context.input_data as *mut _, DEALLOC_LAYOUT);
     }
 
-    if let Some(port) = GlobalPorts::get_port(context.identifier) {
+    if let Some(port) = GlobalSerialPorts::get_port(context.identifier) {
         if let Some(callback) = context.completion_routine {
             // SAFETY: This is safe because:
             //         `Status` is interpreted as an i32, and not as a dangerous

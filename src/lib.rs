@@ -3,7 +3,7 @@
 //! behavior over an easy to use set of functions and data structures.
 //!
 //! We take advantage of the SerCx2 framework to standardize all devices in the
-//! Ports class.
+//! SerialPorts class.
 //!
 #![no_std]
 use core::{alloc::Layout, ptr::null_mut};
@@ -21,7 +21,7 @@ mod misc;
 pub mod port;
 pub mod port_info;
 
-use port_info::PortInfo;
+use port_info::SerialPortInfo;
 
 /// Used because the WdkAllocator does not use layouts in deallocation, but the
 /// trait requires them.
@@ -37,16 +37,16 @@ const PORT_CLASS_GUID: GUID = GUID {
 };
 
 ///
-/// `list_ports` iterates over all available devices in the Ports class,
+/// `list_ports` iterates over all available devices in the SerialPorts class,
 /// returning a list of their symbolic names in a Vector, for ease of use.
 ///
 /// # Return value:
 ///
-/// * `Ok(Vec<PortInfo>)` - The list of all ports' info, if successful.
+/// * `Ok(Vec<SerialPortInfo>)` - The list of all ports' info, if successful.
 /// * `Err(NTSTATUS)` - Otherwise, with the status of the failed
 ///   IoGetDeviceInterfaces call.
 ///
-pub fn list_ports() -> Result<Vec<PortInfo>, NTSTATUS> {
+pub fn list_ports() -> Result<Vec<SerialPortInfo>, NTSTATUS> {
     let device: PDEVICE_OBJECT = null_mut();
     let mut symbolic_link_list: PZZWSTR = null_mut();
 
@@ -66,7 +66,7 @@ pub fn list_ports() -> Result<Vec<PortInfo>, NTSTATUS> {
         return Err(interfaces_status);
     }
 
-    let symbolic_list = PortInfo::from_wstr_array(symbolic_link_list);
+    let symbolic_list = SerialPortInfo::from_wstr_array(symbolic_link_list);
 
     // SAFETY: This is safe because:
     //         1. `symbolic_link_list` is not freed anywhere else.

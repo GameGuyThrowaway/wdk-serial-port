@@ -1,6 +1,6 @@
 //!
-//! Defines a PortInfo class, and associated data structures. Used to represent
-//! a port before it is opened for reading/writing.
+//! Defines a SerialPortInfo class, and associated data structures. Used to
+//! represent a port before it is opened for reading/writing.
 //!
 
 use core::{
@@ -21,18 +21,18 @@ use wdk_sys::{
 };
 
 use crate::{
-    port::{NewPortErr, Port, PortIdentifier},
+    port::{NewSerialPortErr, SerialPort, SerialPortIdentifier},
     DEALLOC_LAYOUT,
 };
 
 #[derive(Debug)]
-pub enum OpenPortErr {
+pub enum OpenSerialPortErr {
     #[allow(dead_code)]
     FailedToCreateHandle(NTSTATUS),
     #[allow(dead_code)]
     FailedToGetObjectFromHandle(NTSTATUS),
     #[allow(dead_code)]
-    FailedToMakePort(NewPortErr),
+    FailedToMakeSerialPort(NewSerialPortErr),
     #[allow(dead_code)]
     FailedToCreateMutex(DriverMutexError),
 }
@@ -41,7 +41,7 @@ pub enum OpenPortErr {
 /// Represents a possible port to open, and its identifying information, as well
 /// as any necessary information to open the port.
 ///
-pub struct PortInfo {
+pub struct SerialPortInfo {
     /// The String form of the path, used for easy comparison.
     pub path: String,
 
@@ -51,21 +51,21 @@ pub struct PortInfo {
     unicode_path: UNICODE_STRING,
 }
 
-impl PortInfo {
+impl SerialPortInfo {
     ///
-    /// `new` is a constructor for a PortInfo instance.
+    /// `new` is a constructor for a SerialPortInfo instance.
     ///
     /// # Arguments
     ///
     /// * `path` - The string form of the absolute port path.
     /// * `unicode_path` - The unicode form of the absolute port path. This must
     ///   have no other references, and have been allocated via WdkAllocator.
-    ///   It is taken by this function, and will be released upon the PortInfo
-    ///   dropping.
+    ///   It is taken by this function, and will be released upon the
+    ///   SerialPortInfo dropping.
     ///
     /// # Return value:
     ///
-    /// * `PortInfo` - The new PortInfo instance
+    /// * `SerialPortInfo` - The new SerialPortInfo instance
     ///
     pub fn new(path: String, unicode_path: UNICODE_STRING) -> Self {
         Self { path, unicode_path }
@@ -73,7 +73,7 @@ impl PortInfo {
 
     ///
     /// `from_wstr_array` takes a PZZWSTR from a successful
-    /// IoGetDeviceInterfaces call, and converts it into a Vec<PortInfo>.
+    /// IoGetDeviceInterfaces call, and converts it into a Vec<SerialPortInfo>.
     ///
     /// # Arguments
     ///
@@ -84,9 +84,10 @@ impl PortInfo {
     ///
     /// # Return value:
     ///
-    /// * `Vec<PortInfo>` - The list of PortInfos extracted from the wstr array.
+    /// * `Vec<SerialPortInfo>` - The list of SerialPortInfos extracted from the
+    ///   wstr array.
     ///
-    pub fn from_wstr_array(wstr_array: PZZWSTR) -> Vec<PortInfo> {
+    pub fn from_wstr_array(wstr_array: PZZWSTR) -> Vec<SerialPortInfo> {
         let mut list = Vec::new();
 
         let mut start = wstr_array;
@@ -151,7 +152,7 @@ impl PortInfo {
                     RtlInitUnicodeString(&mut unicode_path, string_clone);
                 }
 
-                list.push(PortInfo::new(path, unicode_path));
+                list.push(SerialPortInfo::new(path, unicode_path));
             }
 
             // SAFETY: This is safe because:
@@ -168,7 +169,7 @@ impl PortInfo {
     }
 
     ///
-    /// `open_port` uses the information stored in a PortInfo to open read/write
+    /// `open_port` uses the information stored in a SerialPortInfo to open read/write
     /// access to that port.
     ///
     /// Specifically, this function opens a file handle to the port path, and
@@ -176,9 +177,9 @@ impl PortInfo {
     /// port. The device object being necessary to send IRPs (and thus IOCTLs).
     ///
     /// The created port is then placed in the global port array, and its
-    /// identifier is returned. To get the port, use the `GlobalPorts::get_port`
-    /// function, and to close the port, use the `GlobalPorts::close_port`
-    /// function.
+    /// identifier is returned. To get the port, use the
+    /// `GlobalSerialPorts::get_port` function, and to close the port, use the
+    /// `GlobalSerialPorts::close_port` function.
     ///
     /// # Arguments:
     ///
@@ -186,10 +187,10 @@ impl PortInfo {
     ///
     /// # Return value:
     ///
-    /// * `Ok(PortIdentifier)` - The port identifier, if successful
-    /// * `Err(OpenPortErr)` - Otherwise
+    /// * `Ok(SerialPortIdentifier)` - The port identifier, if successful
+    /// * `Err(OpenSerialPortErr)` - Otherwise
     ///
-    pub fn open(&mut self, baud_rate: u32) -> Result<PortIdentifier, OpenPortErr> {
+    pub fn open(&mut self, baud_rate: u32) -> Result<SerialPortIdentifier, OpenSerialPortErr> {
         let mut attributes = OBJECT_ATTRIBUTES {
             Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
             ObjectName: &mut self.unicode_path,
@@ -223,7 +224,7 @@ impl PortInfo {
         };
 
         if !nt_success(create_file_status) || file_handle.is_null() {
-            return Err(OpenPortErr::FailedToCreateHandle(create_file_status));
+            return Err(OpenSerialPortErr::FailedToCreateHandle(create_file_status));
         }
 
         let mut file_object: PFILE_OBJECT = null_mut();
@@ -252,7 +253,7 @@ impl PortInfo {
             unsafe {
                 let _ = ZwClose(file_handle);
             }
-            return Err(OpenPortErr::FailedToGetObjectFromHandle(ob_ref_status));
+            return Err(OpenSerialPortErr::FailedToGetObjectFromHandle(ob_ref_status));
         }
 
         // SAFETY: This is safe because:
@@ -260,14 +261,14 @@ impl PortInfo {
         //            pointer by ObReferenceObjectByHandle returning SUCCESS.
         let device_object = unsafe { IoGetRelatedDeviceObject(file_object) };
 
-        Port::new(device_object, file_object, file_handle, baud_rate)
-            .map_err(|e| OpenPortErr::FailedToMakePort(e))
+        SerialPort::new(device_object, file_object, file_handle, baud_rate)
+            .map_err(|e| OpenSerialPortErr::FailedToMakeSerialPort(e))
     }
 }
 
-impl Drop for PortInfo {
+impl Drop for SerialPortInfo {
     ///
-    /// `drop` cleans up all stored data held by the PortInfo, freeing any in
+    /// `drop` cleans up all stored data held by the SerialPortInfo, freeing any in
     /// use memory.
     ///
     fn drop(&mut self) {

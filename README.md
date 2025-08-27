@@ -75,6 +75,11 @@ fn list_ports() {
 This example opens a com port at 115_200 baud, sends "Hello World\n" to it, and then closes it.
 
 ```rust
+use wdk_serial_port::{
+    port::GlobalPorts,
+    port_info::PortInfo
+};
+
 fn write_string(port_info: &mut PortInfo) {
     match port_info.open(115_200) {
         Ok(identifier) => {
@@ -110,6 +115,11 @@ since the com port was opened. The return value of the callback specifies to dra
 In this example, the callback drains the entire read buffer after echoing its contents back to the port.
 
 ```rust
+use wdk_serial_port::{
+    port::{GlobalPorts, Port},
+    port_info::PortInfo
+};
+
 fn read_async(port_info: &mut PortInfo) {
     match port_info.open(115_200) {
         Ok(identifier) => {
@@ -132,7 +142,7 @@ fn read_async(port_info: &mut PortInfo) {
     }
 }
 
-fn serial_read_handler(identifier: PortIdentifier, data: &[u8]) -> usize {
+fn serial_read_handler(port: &KMutex<'_, Port>, data: &[u8]) -> usize {
     use alloc::string::String;
     println!("Serial Read: {:?} | {}", data, String::from_utf8_lossy(&data));
 

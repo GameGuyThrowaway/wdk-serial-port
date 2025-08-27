@@ -17,11 +17,7 @@ use wdk_sys::{
     ntddk::{
         memcpy, IoGetRelatedDeviceObject, ObReferenceObjectByHandle, RtlInitUnicodeString, ZwClose,
         ZwCreateFile,
-    },
-    IoFileObjectType, FILE_ATTRIBUTE_NORMAL, FILE_OPEN, FILE_READ_DATA, FILE_WRITE_DATA,
-    GENERIC_READ, GENERIC_WRITE, HANDLE, IO_STATUS_BLOCK, NTSTATUS, OBJECT_ATTRIBUTES,
-    OBJ_CASE_INSENSITIVE, OBJ_KERNEL_HANDLE, PFILE_OBJECT, PZZWSTR, UNICODE_STRING, _FILE_OBJECT,
-    _MODE::KernelMode,
+    }, IoFileObjectType, FILE_ATTRIBUTE_NORMAL, FILE_OPEN, FILE_READ_DATA, FILE_WRITE_DATA, GENERIC_READ, GENERIC_WRITE, HANDLE, IO_STATUS_BLOCK, NTSTATUS, OBJECT_ATTRIBUTES, OBJ_CASE_INSENSITIVE, OBJ_KERNEL_HANDLE, PFILE_OBJECT, PVOID, PZZWSTR, UNICODE_STRING, _MODE::KernelMode
 };
 
 use crate::{
@@ -103,7 +99,8 @@ impl PortInfo {
 
             // SAFETY: This is safe because:
             //         1. `start`, and thus `end` are non null.
-            //         2. `end` is a pointer to a null terminated unicode string.
+            //         2. `end` is a pointer to a null terminated unicode 
+            //            string.
             unsafe {
                 while *end != 0 {
                     end = end.add(1);
@@ -230,7 +227,7 @@ impl PortInfo {
         }
 
         let mut file_object: PFILE_OBJECT = null_mut();
-        let file_object_ptr: *mut *mut _FILE_OBJECT = &mut file_object;
+        let file_object_ptr: *mut PFILE_OBJECT = &mut file_object;
 
         // SAFETY: This is safe because:
         //         1. `handle` is guaranteed to be a valid HANDLE by
@@ -243,7 +240,7 @@ impl PortInfo {
                 FILE_READ_DATA | FILE_WRITE_DATA,
                 *IoFileObjectType,
                 KernelMode as i8,
-                file_object_ptr as *mut *mut _,
+                file_object_ptr as *mut PVOID,
                 null_mut(),
             )
         };

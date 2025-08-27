@@ -1,6 +1,5 @@
 use core::{
     alloc::{GlobalAlloc, Layout},
-    ffi::c_void,
     ptr::null_mut,
     slice,
     sync::atomic::{AtomicPtr, Ordering},
@@ -9,18 +8,11 @@ use core::{
 use alloc::{boxed::Box, vec::Vec};
 use wdk::nt_success;
 use wdk_alloc::WdkAllocator;
-use wdk_mutex::kmutex::KMutex;
+use wdk_mutex::kmutex::{KMutex, KMutexGuard};
 use wdk_sys::{
     ntddk::{
-        IoBuildDeviceIoControlRequest, IoBuildSynchronousFsdRequest, IofCallDriver,
-        KeInitializeEvent, KeWaitForSingleObject, ObfDereferenceObject, ZwClose,
-    },
-    BOOLEAN, DO_DIRECT_IO, HANDLE, IO_STATUS_BLOCK, IRP_MJ_READ, IRP_MJ_WRITE, KEVENT, NTSTATUS,
-    PDEVICE_OBJECT, PFILE_OBJECT, STATUS_PENDING, STATUS_SUCCESS, _DEVICE_OBJECT,
-    _EVENT_TYPE::NotificationEvent,
-    _IRP,
-    _KWAIT_REASON::Executive,
-    _MODE::KernelMode,
+        IoBuildDeviceIoControlRequest, IoBuildSynchronousFsdRequest, IofCallDriver, KeInitializeEvent, KeWaitForSingleObject, ObfDereferenceObject, ZwClose
+    }, BOOLEAN, DO_DIRECT_IO, HANDLE, IO_STATUS_BLOCK, IRP_MJ_READ, IRP_MJ_WRITE, KEVENT, NTSTATUS, PDEVICE_OBJECT, PFILE_OBJECT, PIO_STATUS_BLOCK, PIRP, PVOID, STATUS_PENDING, STATUS_SUCCESS, _EVENT_TYPE::NotificationEvent, _KWAIT_REASON::Executive, _MODE::KernelMode
 };
 
 use ioctl::{
@@ -238,6 +230,8 @@ impl Port {
 
             Ok(identifier)
         } else {
+            // SAFETY: This is safe because:
+            //         `mutex_ptr` was just created via Box::into_raw.
             let _ = unsafe { Box::from_raw(mutex_ptr) };
             Err(NewPortErr::FailedToAddToPortArray)
         }
@@ -555,7 +549,8 @@ impl Port {
     /// * `input_data` - The data to be sent alongside the request.
     /// * `output_data_len` - The size of the output buffer to be allocated, and
     ///   thus the maximum amount of return data possible.
-    /// * `completion_routine` - The function called when the IOCTL finishes.
+    /// * `completion_routine` - The function called when the IOCTL finishes,
+    ///   called at IRQL_PASSIVE_LEVEL.
     ///
     /// # Return value:
     ///
@@ -596,9 +591,9 @@ impl Port {
         let context_layout = Layout::new::<AsyncIOCTLContext>();
         // SAFETY: This is safe because:
         //         The result pointer is compared against null.
-        let context = unsafe { WdkAllocator.alloc(context_layout) as *mut AsyncIOCTLContext };
+        let context_ptr = unsafe { WdkAllocator.alloc(context_layout) as *mut AsyncIOCTLContext };
 
-        if context.is_null() {
+        if context_ptr.is_null() {
             // SAFETY: This is safe because:
             //         1. `io_status` is a valid WdkAllocator allocated pool,
             //            with no dangling pointers.
@@ -612,15 +607,12 @@ impl Port {
         }
 
         // SAFETY: This is safe because:
-        //         We have proven that `context` is not null, and we are
-        //         guaranteed that if it is not, it is the size of an
-        //         AsyncIOCTLContext.
-        unsafe {
-            (*context).identifier = self.identifier.unwrap();
-            (*context).input_data = data_clone;
-            (*context).io_status = io_status;
-            (*context).completion_routine = completion_routine;
-        }
+        //         `context_ptr` is a valid AsyncIOCTLContext pointer
+        let context = unsafe { &mut *context_ptr };
+        context.identifier = self.identifier.unwrap();
+        context.input_data = data_clone;
+        context.io_status = io_status;
+        context.completion_routine = completion_routine;
 
         // SAFETY: This is safe because:
         //         1. `device_object` is guaranteed to be a valid PDEVICE_OBJECT
@@ -654,7 +646,7 @@ impl Port {
             unsafe {
                 WdkAllocator.dealloc(io_status as *mut _, DEALLOC_LAYOUT);
                 WdkAllocator.dealloc(data_clone, DEALLOC_LAYOUT);
-                WdkAllocator.dealloc(context as *mut _, DEALLOC_LAYOUT);
+                WdkAllocator.dealloc(context_ptr as *mut _, DEALLOC_LAYOUT);
             }
             return Err(SendIRPErr::IRPBuildError);
         }
@@ -666,8 +658,8 @@ impl Port {
         unsafe {
             IoSetCompletionRoutine(
                 irp,
-                Some(async_ioctl_completion_routine),
-                context as *mut _,
+                Some(async_ioctl_completion_routine_unsafe),
+                context_ptr as *mut _,
                 true as BOOLEAN,
                 true as BOOLEAN,
                 true as BOOLEAN,
@@ -689,7 +681,7 @@ impl Port {
             unsafe {
                 WdkAllocator.dealloc(io_status as *mut _, DEALLOC_LAYOUT);
                 WdkAllocator.dealloc(data_clone, DEALLOC_LAYOUT);
-                WdkAllocator.dealloc(context as *mut _, DEALLOC_LAYOUT);
+                WdkAllocator.dealloc(context_ptr as *mut _, DEALLOC_LAYOUT);
             }
             return Err(SendIRPErr::CallDriverError(driver_call_status));
         }
@@ -770,7 +762,29 @@ impl Port {
 
     ///
     /// `start_async_read_system` starts the async read system, which consists
-    /// of a routine called whenever the port is sent some data.
+    /// of a routine called at IRQL_PASSIVE_LEVEL when the port receives data.
+    ///
+    /// This function will only operate the first time it is called. All
+    /// proceeding calls on the same port are ignored, as the async read stream
+    /// is already started. They will however return Ok(()).
+    ///
+    /// The read system receives data asynchronously from the serial port,
+    /// buffers it internally, and then calls the `callback` with the buffer.
+    /// Data is only ever removed from the buffer when the callback returns a
+    /// usize.
+    ///
+    /// # Arguments
+    ///
+    /// * `callback` - A function to call when a read is completed, which is
+    /// passed a reference to the internal data buffer. This function will
+    /// always be called at IRQL_PASSIVE_LEVEL.
+    ///
+    /// # Return value:
+    ///
+    /// * `Ok()` - Upon success.
+    /// * `Err(PortWriteErr)` - Otherwise.
+    /// 
+    /// # Details:
     ///
     /// This system works by first setting the serial wait mask to RXCHAR,
     /// making the serial port driver respond to a WAIT_ON_MASK once it receives
@@ -786,25 +800,6 @@ impl Port {
     ///
     /// This function consists purely of setting the wait mask, and queueing the
     /// cyclic WAIT_ON_MASK call.
-    ///
-    /// This function will only operate the first time it is called. All
-    /// proceeding calls on the same port are ignored, as the async read stream
-    /// is already started. They will however return Ok(()).
-    ///
-    /// The read system receives data asynchronously from the serial port,
-    /// buffers it internally, and then calls the `callback` with the buffer.
-    /// Data is only ever removed from the buffer when the callback returns a
-    /// usize.
-    ///
-    /// # Arguments
-    ///
-    /// * `callback` - A function to call when a read is completed, which is
-    /// passed a reference to the internal data buffer.
-    ///
-    /// # Return value:
-    ///
-    /// * `Ok()` - Upon success.
-    /// * `Err(PortWriteErr)` - Otherwise.
     ///
     pub fn start_async_read_system(
         &mut self,
@@ -855,12 +850,15 @@ impl Port {
 /// serial port's data buffer, shifting the buffer left by `amount` bytes. The
 /// buffer's new 0th index will become data[amount].
 ///
-type AsyncReadCallback = fn(identifier: PortIdentifier, data: &[u8]) -> usize;
+type AsyncReadCallback = fn(port: &KMutexGuard<'_, Port>, data: &[u8]) -> usize;
 
 ///
 /// `rxchar_callback` is the completion routine for the RXCHAR WAIT_ON_MASK
 /// serial IOCTL. As such, this function is called when one or more characters
 /// are received by a serial port.
+/// 
+/// This is a wrapper around a worker item, which handles all port processing,
+/// due to the constraints of KMutexes, and requiring IRQL_PASSIVE_LEVEL.
 ///
 /// When the RXCHAR IOCTL was successful, this function is expected to send
 /// an IOCTL asking the serial port how much data it has available, and
@@ -871,6 +869,12 @@ type AsyncReadCallback = fn(identifier: PortIdentifier, data: &[u8]) -> usize;
 ///
 /// TODO: The WAIT_ON_MASK docs don't say much about potential errors. I assume
 /// that if it wasn't successful, the serial port is likely closed/unavailable.
+/// 
+/// TODO: This function locks for a while. I should create a worker task to
+/// handle it past the RXCHAR recursion.
+/// 
+/// TODO: Currently we lock the port before knowing if we're at IRQL_PASSIVE. I
+/// should verify or use a worker task to guarantee IRQL_PASSIVE.
 ///
 /// # Arguments
 ///
@@ -911,7 +915,7 @@ fn rxchar_callback(port: *mut KMutex<Port>, status: NTSTATUS, data: &[u8]) {
 
         if let Ok(_) = port.read_blocking(bytes_available) {
             let read_callback = &port.async_read_callback.unwrap();
-            let to_delete = read_callback(port.identifier.unwrap(), &port.read_buffer);
+            let to_delete = read_callback(&port, &port.read_buffer);
             let end_idx = to_delete.min(port.read_buffer.len());
             port.read_buffer.drain(0..end_idx);
         }
@@ -933,7 +937,7 @@ struct AsyncIOCTLContext {
     identifier: PortIdentifier,
     /// A pointer to the WdkAllocator allocated IO_STATUS_BLOCK used by the
     /// IOCTL. Deallocated in completion routine so that lifetime is correct.
-    io_status: *mut IO_STATUS_BLOCK,
+    io_status: PIO_STATUS_BLOCK,
     /// A pointer to the WdkAllocator allocated input data buffer used by the
     /// IOCTL. Deallocated in completion routine so that lifetime is correct.
     input_data: *mut u8,
@@ -941,16 +945,45 @@ struct AsyncIOCTLContext {
     completion_routine: Option<AsyncIOCTLCallback>,
 }
 
-// SAFETY: This is safe because:
-//         1. This routine is only used by `send_ioctl_async`, guaranteeing the
-//            invariant should be maintained.
-//         2. `context` is always be an AsyncIOCTLContext allocated via
-//            WdkAllocator, and thus should never be null.
-//         3. `device_object` isn't trusted, and is compared to null before use.
-unsafe extern "C" fn async_ioctl_completion_routine(
-    device_object: *mut _DEVICE_OBJECT,
-    irp: *mut _IRP,
-    context_ptr: *mut c_void,
+///
+/// A wrapper around the `async_ioctl_completion_routine`, which ensures safety.
+///
+unsafe extern "C" fn async_ioctl_completion_routine_unsafe(
+    device_object: PDEVICE_OBJECT,
+    irp: PIRP,
+    context_ptr: PVOID,
+) -> NTSTATUS {
+    async_ioctl_completion_routine(device_object, irp, context_ptr)
+}
+
+///
+/// `async_ioctl_completion_routine` is the completion routine for async serial
+/// port IOCTLs.
+///
+/// This function works for a multitude of IOCTLs, as it simply calls a user
+/// defined callback with the data received, port the ioctl was related to, and
+/// the status of the ioctl.
+///
+/// Because this routine is called with IRQL = 0, I assume it is safe for me to
+/// call the user callback, and trust they return within a reasonable amount of
+/// time. This is in contrast to the WSK callbacks, which are at IRQL = 2, and
+/// use workitem queues to defer user callback processing.
+///
+/// # Arguments:
+///
+/// * `device_object` - An possibly null PDEVICE_OBJECT.
+/// * `irp_ptr` - A pointer to the IRP being completed. This must not be null.
+/// * `context` - A pointer to the call's context, stored in a WdKAllocator
+///   allocated AsyncIOCTLContext. This must not be null.
+///
+/// # Return Value:
+///
+/// * `NTSTATUS` - The status of the call. This should always be STATUS_SUCCESS.
+///
+fn async_ioctl_completion_routine(
+    device_object: PDEVICE_OBJECT,
+    irp: PIRP,
+    context_ptr: PVOID,
 ) -> NTSTATUS {
     if context_ptr.is_null() || irp.is_null() {
         // invariant violated
@@ -976,7 +1009,7 @@ unsafe extern "C" fn async_ioctl_completion_routine(
 
     if let Some(port) = GlobalPorts::get_port(context.identifier) {
         if let Some(callback) = context.completion_routine {
-            // SFAETY: This is safe because:
+            // SAFETY: This is safe because:
             //         `Status` is interpreted as an i32, and not as a dangerous
             //         type like a raw pointer.
             let status = unsafe {
@@ -990,8 +1023,12 @@ unsafe extern "C" fn async_ioctl_completion_routine(
                 if !device_object.is_null()
                     && ((*device_object).Flags & DO_DIRECT_IO) == DO_DIRECT_IO
                 {
-                    todo!()
-                    // irp.MdlAddress as *mut u8
+                    // I have never seen device_object be non null, nor direct
+                    // IO used in this context. However this todo should be
+                    // removed and replaced with proper mdl handling before
+                    // production release.
+
+                    todo!() // irp.MdlAddress as *mut u8
                 } else {
                     irp.AssociatedIrp.SystemBuffer as *mut u8
                 }
@@ -999,7 +1036,10 @@ unsafe extern "C" fn async_ioctl_completion_routine(
 
             let mut data = Vec::with_capacity(bytes_read);
             if !raw_data.is_null() {
-                let slice = slice::from_raw_parts(raw_data, bytes_read);
+                // SAFETY: This is safe because:
+                //         `raw_data` is a valid pointer to a buffer with a
+                //         length of `bytes_read` bytes.
+                let slice = unsafe { slice::from_raw_parts(raw_data, bytes_read) };
                 data.extend_from_slice(slice);
             }
 

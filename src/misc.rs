@@ -7,9 +7,11 @@
 //!
 #![allow(non_snake_case)]
 
+use core::ptr::null_mut;
+
 use wdk_sys::{
-    BOOLEAN, PIO_COMPLETION_ROUTINE, PIO_STACK_LOCATION, PIRP, PVOID, SL_INVOKE_ON_CANCEL,
-    SL_INVOKE_ON_ERROR, SL_INVOKE_ON_SUCCESS,
+    BOOLEAN, PIO_COMPLETION_ROUTINE, PIO_STACK_LOCATION, PIRP, PVOID, PWORKER_THREAD_ROUTINE,
+    PWORK_QUEUE_ITEM, SL_INVOKE_ON_CANCEL, SL_INVOKE_ON_ERROR, SL_INVOKE_ON_SUCCESS,
 };
 
 pub unsafe fn IoSetCompletionRoutine(
@@ -56,4 +58,14 @@ pub unsafe fn IoGetNextIrpStackLocation(Irp: PIRP) -> PIO_STACK_LOCATION {
         .__bindgen_anon_1
         .CurrentStackLocation
         .sub(1);
+}
+
+pub unsafe fn ExInitializeWorkItem(
+    Item: PWORK_QUEUE_ITEM,
+    Routine: PWORKER_THREAD_ROUTINE,
+    Context: PVOID,
+) {
+    (*Item).WorkerRoutine = Routine;
+    (*Item).Parameter = Context;
+    (*Item).List.Flink = null_mut();
 }

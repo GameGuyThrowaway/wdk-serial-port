@@ -11,8 +11,16 @@ use wdk_alloc::WdkAllocator;
 use wdk_mutex::kmutex::{KMutex, KMutexGuard};
 use wdk_sys::{
     ntddk::{
-        IoBuildDeviceIoControlRequest, IoBuildSynchronousFsdRequest, IofCallDriver, KeInitializeEvent, KeWaitForSingleObject, ObfDereferenceObject, ZwClose
-    }, BOOLEAN, DO_DIRECT_IO, HANDLE, IO_STATUS_BLOCK, IRP_MJ_READ, IRP_MJ_WRITE, KEVENT, NTSTATUS, PDEVICE_OBJECT, PFILE_OBJECT, PIO_STATUS_BLOCK, PIRP, PVOID, STATUS_PENDING, STATUS_SUCCESS, _EVENT_TYPE::NotificationEvent, _KWAIT_REASON::Executive, _MODE::KernelMode
+        ExQueueWorkItem, IoBuildDeviceIoControlRequest, IoBuildSynchronousFsdRequest,
+        IofCallDriver, KeInitializeEvent, KeWaitForSingleObject, ObfDereferenceObject, ZwClose,
+    },
+    BOOLEAN, DO_DIRECT_IO, HANDLE, IO_STATUS_BLOCK, IRP_MJ_READ, IRP_MJ_WRITE, KEVENT, NTSTATUS,
+    PDEVICE_OBJECT, PFILE_OBJECT, PIO_STATUS_BLOCK, PIRP, PVOID, PWORK_QUEUE_ITEM, STATUS_PENDING,
+    STATUS_SUCCESS, WORK_QUEUE_ITEM,
+    _EVENT_TYPE::NotificationEvent,
+    _KWAIT_REASON::Executive,
+    _MODE::KernelMode,
+    _WORK_QUEUE_TYPE::DelayedWorkQueue,
 };
 
 use ioctl::{
@@ -23,7 +31,10 @@ use ioctl::{
     SERIAL_LINE_CONTROL, SERIAL_RTS_CONTROL, SERIAL_STATUS, SERIAL_TIMEOUTS, SERIAL_XOFF_CONTINUE,
 };
 
-use crate::{misc::IoSetCompletionRoutine, DEALLOC_LAYOUT};
+use crate::{
+    misc::{ExInitializeWorkItem, IoSetCompletionRoutine},
+    DEALLOC_LAYOUT,
+};
 
 mod ioctl;
 
@@ -551,7 +562,7 @@ impl SerialPort {
     /// * `output_data_len` - The size of the output buffer to be allocated, and
     ///   thus the maximum amount of return data possible.
     /// * `completion_routine` - The function called when the IOCTL finishes,
-    ///   called at IRQL_PASSIVE_LEVEL.
+    ///   called at <= IRQL_DISPATCH_LEVEL.
     ///
     /// # Return value:
     ///
@@ -784,7 +795,7 @@ impl SerialPort {
     ///
     /// * `Ok()` - Upon success.
     /// * `Err(SendIRPErr)` - Otherwise.
-    /// 
+    ///
     /// # Details:
     ///
     /// This system works by first setting the serial wait mask to RXCHAR,
@@ -857,25 +868,13 @@ type AsyncReadCallback = fn(port: &KMutexGuard<'_, SerialPort>, data: &[u8]) -> 
 /// `rxchar_callback` is the completion routine for the RXCHAR WAIT_ON_MASK
 /// serial IOCTL. As such, this function is called when one or more characters
 /// are received by a serial port.
-/// 
-/// This is a wrapper around a worker item, which handles all port processing,
-/// due to the constraints of KMutexes, and requiring IRQL_PASSIVE_LEVEL.
 ///
-/// When the RXCHAR IOCTL was successful, this function is expected to send
-/// an IOCTL asking the serial port how much data it has available, and
-/// then send an IRP_MJ_READ to read the data.
-///
-/// This function should also re-submit a WAIT_ON_MASK IOCTL to repeat the read
-/// cycle.
+/// This is called at IRQL_DISPATCH_LEVEL, as per `send_ioctl_async`, and so is
+/// a wrapper around a worker item, which handles all port processing, due to
+/// the constraints of KMutexes requiring IRQL_PASSIVE_LEVEL.
 ///
 /// TODO: The WAIT_ON_MASK docs don't say much about potential errors. I assume
 /// that if it wasn't successful, the serial port is likely closed/unavailable.
-/// 
-/// TODO: This function locks for a while. I should create a worker task to
-/// handle it past the RXCHAR recursion.
-/// 
-/// TODO: Currently we lock the port before knowing if we're at IRQL_PASSIVE. I
-/// should verify or use a worker task to guarantee IRQL_PASSIVE.
 ///
 /// # Arguments
 ///
@@ -883,7 +882,7 @@ type AsyncReadCallback = fn(port: &KMutexGuard<'_, SerialPort>, data: &[u8]) -> 
 /// * `status` - The status of the IOCTL request.
 /// * `data` - The output data of the IOCTL request.
 ///
-fn rxchar_callback(port: *mut KMutex<SerialPort>, status: NTSTATUS, data: &[u8]) {
+fn rxchar_callback(identifier: SerialPortIdentifier, status: NTSTATUS, data: &[u8]) {
     if data.len() != 4 {
         return;
     }
@@ -897,7 +896,97 @@ fn rxchar_callback(port: *mut KMutex<SerialPort>, status: NTSTATUS, data: &[u8])
         return;
     }
 
-    let mut port = unsafe { (*port).lock().unwrap() };
+    let context_layout = Layout::new::<WorkItemContext>();
+    let context_ptr = unsafe { WdkAllocator.alloc_zeroed(context_layout) as *mut WorkItemContext };
+    if !context_ptr.is_null() {
+        // SAFETY: This is safe because:
+        //         `context_ptr` is a valid pointer.
+        let context = unsafe { &mut *context_ptr };
+        context.identifier = identifier;
+
+        // SAFETY: This is safe because:
+        //         1. `WorkItem` is a valid PWORK_QUEUE_ITEM.
+        //         2. `context_ptr` is a WdkAllocator allocated WorkItemContext,
+        //            as required by the invariant defined in
+        //            `rxchar_workitem_routine`.
+        unsafe {
+            ExInitializeWorkItem(
+                &mut context.work_item as PWORK_QUEUE_ITEM,
+                Some(rxchar_workitem_routine_unsafe),
+                context_ptr as PVOID,
+            );
+        }
+
+        // SAFETY: This is safe because:
+        //         `WorkItem` is a valid PWORK_QUEUE_ITEM.
+        unsafe {
+            ExQueueWorkItem(&mut context.work_item as PWORK_QUEUE_ITEM, DelayedWorkQueue);
+        }
+    }
+}
+
+///
+/// Context for an RXCHAR completion work item. This is used to store all
+/// necessary information for carrying the callback for an RXCHAR being
+/// completed, which requires IRQL_PASSIVE_LEVEL.
+///
+struct WorkItemContext {
+    work_item: WORK_QUEUE_ITEM,
+
+    identifier: SerialPortIdentifier,
+}
+
+///
+/// A wrapper around the `rxchar_workitem_routine`, which ensures safety.
+///
+unsafe extern "C" fn rxchar_workitem_routine_unsafe(context: PVOID) {
+    rxchar_workitem_routine(context)
+}
+
+///
+/// `rxchar_workitem_routine` is the callback function for an RXCHAR ioctl's
+/// WorkItem being ran. This function allows the necessary RXCHAR completion
+/// behavior to be handled at IRQL_PASSIVE_LEVEL. Its behavior matches the
+/// invariant described by the ExQueueWorkItem call in `rxchar_callback`.
+///
+/// Because this function is only called from a work item queue finishing, it
+/// runs at IRQL_PASSIVE_LEVEL, ensuring the callback is run at
+/// IRQL_PASSIVE_LEVEL.
+///
+/// When the RXCHAR IOCTL was successful, this function is expected to send
+/// an IOCTL asking the serial port how much data it has available, and
+/// then send an IRP_MJ_READ to read the data.
+///
+/// This function should also re-submit a WAIT_ON_MASK IOCTL to repeat the read
+/// cycle.
+///
+/// # Arguments:
+///
+/// * `context_ptr` - A valid WorkItemContext pointer, as per the
+///   ExQueueWorkItem call in `rxchar_callback`.
+///
+fn rxchar_workitem_routine(context_ptr: PVOID) {
+    if context_ptr.is_null() {
+        return;
+    }
+
+    // SAFETY: This is safe because:
+    //         `context_ptr` is a valid WdkAllocator allocated WorkItemContext,
+    //         as per the ExQueueWorkItem call in `receive_from_event_handler`.
+    let identifier = unsafe {
+        let id = (*(context_ptr as *mut WorkItemContext)).identifier;
+        WdkAllocator.dealloc(context_ptr as *mut u8, DEALLOC_LAYOUT);
+        id
+    };
+
+    let port_mutex = match GlobalSerialPorts::get_port(identifier) {
+        Some(port_mutex) => port_mutex,
+        None => return,
+    };
+
+    // SAFETY: This is safe because:
+    //         `port_mutex` is a valid pointer, guaranteed by get_port.
+    let mut port = unsafe { (*port_mutex).lock().unwrap() };
     let _ = port.send_ioctl_async(
         IOCTL_SERIAL_WAIT_ON_MASK,
         &[],
@@ -925,8 +1014,8 @@ fn rxchar_callback(port: *mut KMutex<SerialPort>, status: NTSTATUS, data: &[u8])
 
 /// A completion routine, called upon an asynchronous IOCTL completing. This
 /// passes the resulting status and output data. `port` is guaranteed to be non
-/// null.
-type AsyncIOCTLCallback = fn(port: *mut KMutex<SerialPort>, status: NTSTATUS, data: &[u8]);
+/// null. Called at IRQL_DISPATCH_LEVEL.
+type AsyncIOCTLCallback = fn(identifier: SerialPortIdentifier, status: NTSTATUS, data: &[u8]);
 
 ///
 /// A structure used to hold the context of an on-going asynchronous IOCTL
@@ -970,6 +1059,9 @@ unsafe extern "C" fn async_ioctl_completion_routine_unsafe(
 /// time. This is in contrast to the WSK callbacks, which are at IRQL = 2, and
 /// use workitem queues to defer user callback processing.
 ///
+/// TODO: Should I trust this to run at IRQL = 0? Or should I assume it's only
+/// <= 2, and use a WorkItem queue here.
+///
 /// # Arguments:
 ///
 /// * `device_object` - An possibly null PDEVICE_OBJECT.
@@ -1008,44 +1100,38 @@ fn async_ioctl_completion_routine(
         WdkAllocator.dealloc(context.input_data as *mut _, DEALLOC_LAYOUT);
     }
 
-    if let Some(port) = GlobalSerialPorts::get_port(context.identifier) {
-        if let Some(callback) = context.completion_routine {
-            // SAFETY: This is safe because:
-            //         `Status` is interpreted as an i32, and not as a dangerous
-            //         type like a raw pointer.
-            let status = unsafe {
-                irp.IoStatus.__bindgen_anon_1.Status
-            };
-            let bytes_read = irp.IoStatus.Information as usize;
-            // SAFETY: This is safe because:
-            //         `device_object` is only derefrenced after verifying it to
-            //         be a valid pointer.
-            let raw_data = unsafe {
-                if !device_object.is_null()
-                    && ((*device_object).Flags & DO_DIRECT_IO) == DO_DIRECT_IO
-                {
-                    // I have never seen device_object be non null, nor direct
-                    // IO used in this context. However this todo should be
-                    // removed and replaced with proper mdl handling before
-                    // production release.
+    if let Some(callback) = context.completion_routine {
+        // SAFETY: This is safe because:
+        //         `Status` is interpreted as an i32, and not as a dangerous
+        //         type like a raw pointer.
+        let status = unsafe { irp.IoStatus.__bindgen_anon_1.Status };
+        let bytes_read = irp.IoStatus.Information as usize;
+        // SAFETY: This is safe because:
+        //         `device_object` is only derefrenced after verifying it to
+        //         be a valid pointer.
+        let raw_data = unsafe {
+            if !device_object.is_null() && ((*device_object).Flags & DO_DIRECT_IO) == DO_DIRECT_IO {
+                // I have never seen device_object be non null, nor direct
+                // IO used in this context. However this todo should be
+                // removed and replaced with proper mdl handling before
+                // production release.
 
-                    todo!() // irp.MdlAddress as *mut u8
-                } else {
-                    irp.AssociatedIrp.SystemBuffer as *mut u8
-                }
-            };
-
-            let mut data = Vec::with_capacity(bytes_read);
-            if !raw_data.is_null() {
-                // SAFETY: This is safe because:
-                //         `raw_data` is a valid pointer to a buffer with a
-                //         length of `bytes_read` bytes.
-                let slice = unsafe { slice::from_raw_parts(raw_data, bytes_read) };
-                data.extend_from_slice(slice);
+                todo!() // irp.MdlAddress as *mut u8
+            } else {
+                irp.AssociatedIrp.SystemBuffer as *mut u8
             }
+        };
 
-            callback(port, status, &data);
+        let mut data = Vec::with_capacity(bytes_read);
+        if !raw_data.is_null() {
+            // SAFETY: This is safe because:
+            //         `raw_data` is a valid pointer to a buffer with a
+            //         length of `bytes_read` bytes.
+            let slice = unsafe { slice::from_raw_parts(raw_data, bytes_read) };
+            data.extend_from_slice(slice);
         }
+
+        callback(context.identifier, status, &data);
     }
 
     // SAFETY: This is safe because:

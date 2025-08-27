@@ -17,7 +17,11 @@ use wdk_sys::{
     ntddk::{
         memcpy, IoGetRelatedDeviceObject, ObReferenceObjectByHandle, RtlInitUnicodeString, ZwClose,
         ZwCreateFile,
-    }, IoFileObjectType, FILE_ATTRIBUTE_NORMAL, FILE_OPEN, FILE_READ_DATA, FILE_WRITE_DATA, GENERIC_READ, GENERIC_WRITE, HANDLE, IO_STATUS_BLOCK, NTSTATUS, OBJECT_ATTRIBUTES, OBJ_CASE_INSENSITIVE, OBJ_KERNEL_HANDLE, PFILE_OBJECT, PVOID, PZZWSTR, UNICODE_STRING, _MODE::KernelMode
+    },
+    IoFileObjectType, FILE_ATTRIBUTE_NORMAL, FILE_OPEN, FILE_READ_DATA, FILE_WRITE_DATA,
+    GENERIC_READ, GENERIC_WRITE, HANDLE, IO_STATUS_BLOCK, NTSTATUS, OBJECT_ATTRIBUTES,
+    OBJ_CASE_INSENSITIVE, OBJ_KERNEL_HANDLE, PFILE_OBJECT, PVOID, PZZWSTR, UNICODE_STRING,
+    _MODE::KernelMode,
 };
 
 use crate::{
@@ -100,7 +104,7 @@ impl SerialPortInfo {
 
             // SAFETY: This is safe because:
             //         1. `start`, and thus `end` are non null.
-            //         2. `end` is a pointer to a null terminated unicode 
+            //         2. `end` is a pointer to a null terminated unicode
             //            string.
             unsafe {
                 while *end != 0 {
@@ -253,7 +257,9 @@ impl SerialPortInfo {
             unsafe {
                 let _ = ZwClose(file_handle);
             }
-            return Err(OpenSerialPortErr::FailedToGetObjectFromHandle(ob_ref_status));
+            return Err(OpenSerialPortErr::FailedToGetObjectFromHandle(
+                ob_ref_status,
+            ));
         }
 
         // SAFETY: This is safe because:

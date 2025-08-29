@@ -116,7 +116,7 @@ In this example, the callback drains the entire read buffer after echoing its co
 
 ```rust
 use wdk_serial_port::{
-    port::{GlobalSerialPorts, SerialPortInfo, SerialPort},
+    port::{GlobalSerialPorts, SerialPort},
     port_info::SerialPortInfo
 };
 
@@ -142,18 +142,64 @@ fn read_async(port_info: &mut SerialPortInfo) {
     }
 }
 
-fn serial_read_handler(port: &KMutex<'_, SerialPort>, data: &[u8]) -> usize {
+fn serial_read_handler(port: &SerialPort, data: &[u8]) -> usize {
     use alloc::string::String;
     println!("Serial Read: {:?} | {}", data, String::from_utf8_lossy(&data));
 
-    let mutex_ptr = GlobalSerialPorts::get_port(identifier).unwrap();
-    let port_locked = unsafe { (*mutex_ptr).lock().unwrap() };
-
-    match port_locked.write_blocking(data) {
-        Ok(len) => dbg_println!("Wrote {len} bytes"),
-        Err(e) => dbg_println!("Failed to write any data: {:?}", e),
+    match port.write_blocking(data) {
+        Ok(len) => println!("Wrote {len} bytes"),
+        Err(e) => println!("Failed to write any data: {:?}", e),
     }
 
     data.len()
 }
 ```
+
+
+## Connecting to a com port, and loop sending a message
+
+This example connects to a com port at 115_200 baud, and uses the hardware flush callback to know exactly when a message
+has sent. Then it repeats that message upon its completion.
+
+```rust
+use wdk_serial_port::{
+    port::{GlobalSerialPorts, SerialPort},
+    port_info::SerialPortInfo
+};
+
+fn loop_write(port_info: &mut SerialPortInfo) {
+    match port_info.open(115_200) {
+        Ok(identifier) => {
+            println!("Port Opening @");
+
+            let mutex_ptr = GlobalSerialPorts::get_port(identifier).unwrap();
+            let mut port_locked = unsafe { (*mutex_ptr).lock().unwrap() };
+
+            match port_locked.set_flush_callback(flush_callback) {
+                Ok(_) => println!("Started Async Read System"),
+                Err(e) => println!("Failed to start Async Read System: {:?}", e),
+            }
+
+            match port.write_blocking(b"Hello World!") {
+                Ok(len) => println!("Initially Wrote {len} bytes"),
+                Err(e) => println!("Failed to initially write any data: {:?}", e),
+            }
+
+            // Don't close the port until you're done with the async flush
+            // callback system.
+            // GlobalSerialPorts::close_port(identifier);
+        }
+        Err(err) => {
+            println!("Failed to Open Port: {:?}", err);
+        }
+    }
+}
+
+fn flush_callback(port: &SerialPort) {
+    match port.write_blocking(b"Hello World!") {
+        Ok(len) => println!("Wrote {len} bytes"),
+        Err(e) => println!("Failed to write any data: {:?}", e),
+    }
+}
+```
+

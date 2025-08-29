@@ -57,7 +57,7 @@ TODO: Link the Ferrum driver once it is published.
 
 ```rust
 fn list_ports() {
-    match wdk_serial_port::list_ports() {
+    match wdk_serial_port::list_com_ports() {
         Ok(ports) => {
             for mut port_info in ports {
                 println!("Found Port @ `{}`", port_info.path);

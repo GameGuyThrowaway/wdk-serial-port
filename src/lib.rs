@@ -12,6 +12,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use wdk::nt_success;
+use wdk_alloc::WdkAllocator;
 use wdk_sys::{
     ntddk::{ExFreePool, IoGetDeviceInterfaces},
     GUID, NTSTATUS, PDEVICE_OBJECT, PZZWSTR,
@@ -22,6 +23,9 @@ pub mod port;
 pub mod port_info;
 
 use port_info::SerialPortInfo;
+
+#[global_allocator]
+static GLOBAL_ALLOCATOR: WdkAllocator = WdkAllocator;
 
 /// Used because the WdkAllocator does not use layouts in deallocation, but the
 /// trait requires them.
@@ -87,7 +91,7 @@ pub fn list_com_ports() -> Result<Vec<SerialPortInfo>, NTSTATUS> {
 ///
 /// `list_usb_ports` iterates over all available devices in the USB Devices
 /// class, returning a list of their data represented as SerialPortInfo.
-/// 
+///
 /// Be careful using this function. While `list_com_ports` returns device info
 /// that should always be safe to open, most USB device are not com devices,
 /// and so may have undefined behavior to com requests. Be sure to check the

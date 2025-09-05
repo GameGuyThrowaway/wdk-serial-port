@@ -5,11 +5,14 @@
 
 use core::{
     alloc::{GlobalAlloc, Layout},
-    ptr::null_mut,
+    ptr::{self, null_mut},
     slice::from_raw_parts,
 };
 
-use alloc::{string::String, vec::Vec};
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
+};
 use wdk::nt_success;
 use wdk_alloc::WdkAllocator;
 use wdk_mutex::errors::DriverMutexError;
@@ -22,11 +25,12 @@ use wdk_sys::{
     GENERIC_READ, GENERIC_WRITE, HANDLE, IO_STATUS_BLOCK, NTSTATUS, OBJECT_ATTRIBUTES,
     OBJ_CASE_INSENSITIVE, OBJ_KERNEL_HANDLE, PFILE_OBJECT, PVOID, PZZWSTR, UNICODE_STRING,
     _MODE::KernelMode,
+    _UNICODE_STRING,
 };
 
 use crate::{
     port::{NewSerialPortErr, SerialPort, SerialPortIdentifier},
-    DEALLOC_LAYOUT,
+    DEALLOC_LAYOUT, GLOBAL_ALLOCATOR,
 };
 
 #[derive(Debug)]
@@ -57,22 +61,51 @@ pub struct SerialPortInfo {
 
 impl SerialPortInfo {
     ///
-    /// `new` is a constructor for a SerialPortInfo instance.
+    /// `from_path_str` takes a path string, and creates a SerialPortInfo object
+    /// by converting the path to unicode, and constructing the SerialPortInfo.
     ///
     /// # Arguments
     ///
     /// * `path` - The string form of the absolute port path.
-    /// * `unicode_path` - The unicode form of the absolute port path. This must
-    ///   have no other references, and have been allocated via WdkAllocator.
-    ///   It is taken by this function, and will be released upon the
-    ///   SerialPortInfo dropping.
     ///
-    /// # Return value:
+    /// # Return Value
     ///
-    /// * `SerialPortInfo` - The new SerialPortInfo instance
+    /// * `Option<SerialPortInfo>` - The new SerialPortInfo object, or None upon
+    ///   failure to allocate memory.
     ///
-    pub fn new(path: String, unicode_path: UNICODE_STRING) -> Self {
-        Self { path, unicode_path }
+    pub fn from_path_str(path: &str) -> Option<Self> {
+        let mut buf = Vec::with_capacity(path.len());
+        for byte in path.bytes() {
+            buf.push(byte);
+            buf.push(0);
+        }
+
+        let buffer_layout = Layout::from_size_align(buf.len(), 1).unwrap();
+        // SAFETY: This is safe because:
+        //         The result is compared to null.
+        let buffer_ptr = unsafe { GLOBAL_ALLOCATOR.alloc(buffer_layout) } as *mut u16;
+
+        if buffer_ptr.is_null() {
+            return None;
+        }
+
+        // SAFETY: This is safe because:
+        //         1. `buffer_ptr` is a valid pointer to WdkAllocator allocated
+        //            memory, with buf.len() bytes allocated.
+        unsafe {
+            ptr::copy_nonoverlapping(buf.as_slice().as_ptr(), buffer_ptr as *mut u8, buf.len());
+        }
+
+        let unicode_path = _UNICODE_STRING {
+            Length: buf.len() as u16,
+            MaximumLength: buf.len() as u16,
+            Buffer: buffer_ptr,
+        };
+
+        Some(Self {
+            path: path.to_string(),
+            unicode_path,
+        })
     }
 
     ///
@@ -156,7 +189,7 @@ impl SerialPortInfo {
                     RtlInitUnicodeString(&mut unicode_path, string_clone);
                 }
 
-                list.push(SerialPortInfo::new(path, unicode_path));
+                list.push(SerialPortInfo { path, unicode_path });
             }
 
             // SAFETY: This is safe because:

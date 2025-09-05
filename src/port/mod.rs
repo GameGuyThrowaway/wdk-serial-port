@@ -32,7 +32,9 @@ use ioctl::{
 };
 
 use crate::{
-    misc::{ExInitializeWorkItem, IoSetCompletionRoutine}, port::ioctl::SERIAL_EV_TXEMPTY, DEALLOC_LAYOUT
+    misc::{ExInitializeWorkItem, IoSetCompletionRoutine},
+    port::ioctl::SERIAL_EV_TXEMPTY,
+    DEALLOC_LAYOUT,
 };
 
 mod ioctl;
@@ -778,11 +780,11 @@ impl SerialPort {
     ///
     /// `start_async_read_system` starts the async read system, which consists
     /// of a routine called at IRQL_PASSIVE_LEVEL when the port receives data.
-    /// 
+    ///
     /// The first time this function will call, it will start the wait on mask
     /// system, and enable the RXEMPTY feature. All further calls will simply
     /// change the callback.
-    /// 
+    ///
     /// The read system receives data asynchronously from the serial port,
     /// buffers it internally, and then calls the `callback` with the buffer.
     /// Data is only ever removed from the buffer when the callback returns a
@@ -803,14 +805,14 @@ impl SerialPort {
     ///
     /// This system works by first adding RXCHAR to the serial wait mask,
     /// making the serial port driver respond to a WAIT_ON_MASK once it receives
-    /// one or more characters. Then we start the wait on mask system if it 
+    /// one or more characters. Then we start the wait on mask system if it
     /// isn't already. When it completes, if it was because of an RXCHAR, we
     /// know there is some data available, so we make a
     /// IOCTL_SERIAL_GET_COMMSTATUS request, fetching the available bytes. Then,
     /// to end it off, we queue the IRP_MJ_READ, with the length equal to the
     /// number of available bytes, and call the appropriate callback once it
     /// completes.
-    /// 
+    ///
     /// Much of the above behavior is defined in other callbacks, like the
     /// `wait_on_mask_callback`.
     ///
@@ -825,7 +827,7 @@ impl SerialPort {
             self.async_read_callback = Some(callback);
             return Ok(());
         }
-        
+
         let mut wait_mask = SERIAL_EV_RXCHAR;
         if self.hardware_flush_callback.is_some() {
             wait_mask |= SERIAL_EV_TXEMPTY;
@@ -847,7 +849,7 @@ impl SerialPort {
 
         Ok(())
     }
-    
+
     ///
     /// `set_flush_callback` sets the callback for when the hardware flushes its
     /// transmission buffer. This callback is called at IRQL_PASSIVE_LEVEL.
@@ -867,10 +869,7 @@ impl SerialPort {
     /// * `Ok()` - Upon success.
     /// * `Err(SendIRPErr)` - Otherwise.
     ///
-    pub fn set_flush_callback(
-        &mut self,
-        callback: TXEmptyCallback,
-    ) -> Result<(), SendIRPErr> {
+    pub fn set_flush_callback(&mut self, callback: TXEmptyCallback) -> Result<(), SendIRPErr> {
         if self.hardware_flush_callback.is_some() {
             self.hardware_flush_callback = Some(callback);
             return Ok(());
@@ -902,7 +901,7 @@ impl SerialPort {
     /// `start_wait_on_mask` begins/repeats the SERIAL_WAIT_ON_MASK loop, which
     /// is a cyclic async IOCTL, where a new IOCTL is queued after one
     /// completes.
-    /// 
+    ///
     /// This function should only be called to either start the system, or
     /// repeat it after it stops (after IOCTL_SERIAL_SET_WAIT_MASK is called, or
     /// IOCTL_SERIAL_WAIT_ON_MASK returns).
@@ -923,7 +922,7 @@ impl SerialPort {
 
     ///
     /// `handle_rxchar_event` is a helper called when a SERIAL_SET_WAIT_MASK
-    /// completes, and the wait mask had RXCHAR. 
+    /// completes, and the wait mask had RXCHAR.
     ///
     /// This function carries out most of the behavior described in the details
     /// section of `start_async_read_system`.
@@ -931,7 +930,9 @@ impl SerialPort {
     fn handle_rxchar_event(&mut self) {
         if let Some(read_callback) = self.async_read_callback {
             let mut data = [0u8; size_of::<SERIAL_STATUS>()];
-            if let Ok(len_status) = self.send_ioctl_blocking(IOCTL_SERIAL_GET_COMMSTATUS, &[], &mut data) {
+            if let Ok(len_status) =
+                self.send_ioctl_blocking(IOCTL_SERIAL_GET_COMMSTATUS, &[], &mut data)
+            {
                 if !nt_success(len_status) {
                     return;
                 }
@@ -947,10 +948,10 @@ impl SerialPort {
             }
         }
     }
-    
+
     ///
     /// `handle_txempty_event` is a helper called when a SERIAL_SET_WAIT_MASK
-    /// completes, and the wait mask had TXEMPTY. 
+    /// completes, and the wait mask had TXEMPTY.
     ///
     /// This function simply calls the flush_callback.
     ///
@@ -983,7 +984,7 @@ type AsyncReadCallback = fn(port: &SerialPort, data: &[u8]) -> usize;
 ///
 /// `TransmissionCompleteCallback` defines a completion routine called when the
 /// physical serial port finishes flushing its buffer. This is currently used
-/// for clocking, as it should run at the underlying USB clock rate. 
+/// for clocking, as it should run at the underlying USB clock rate.
 ///
 /// # Arguments
 ///
@@ -994,7 +995,7 @@ type TXEmptyCallback = fn(port: &SerialPort);
 ///
 /// `wait_on_mask_callback` is the completion routine for the WAIT_ON_MASK
 /// serial IOCTL.
-/// 
+///
 /// It is currently only used for the RXCHAR and TXEMPTY features.
 ///
 /// This is called at <= IRQL_DISPATCH_LEVEL, as per `send_ioctl_async`, and so
@@ -1025,7 +1026,8 @@ fn wait_on_mask_callback(identifier: SerialPortIdentifier, status: NTSTATUS, dat
     }
 
     let context_layout = Layout::new::<WaitOnMaskWorkItemContext>();
-    let context_ptr = unsafe { WdkAllocator.alloc_zeroed(context_layout) as *mut WaitOnMaskWorkItemContext };
+    let context_ptr =
+        unsafe { WdkAllocator.alloc_zeroed(context_layout) as *mut WaitOnMaskWorkItemContext };
     if !context_ptr.is_null() {
         // SAFETY: This is safe because:
         //         `context_ptr` is a valid pointer.
@@ -1100,9 +1102,7 @@ fn wait_on_mask_workitem_routine(context_ptr: PVOID) {
     // SAFETY: This is safe because:
     //         `context_ptr` is a valid WaitOnMaskWorkItemContext, as per the
     //         ExQueueWorkItem call in `wait_on_mask_callback`.
-    let context = unsafe {
-        &*(context_ptr as *mut WaitOnMaskWorkItemContext)
-    };
+    let context = unsafe { &*(context_ptr as *mut WaitOnMaskWorkItemContext) };
 
     let identifier = context.port_identifier;
     let wait_mask = context.wait_mask;

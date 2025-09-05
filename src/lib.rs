@@ -24,7 +24,6 @@ pub mod port_info;
 
 use port_info::SerialPortInfo;
 
-#[global_allocator]
 static GLOBAL_ALLOCATOR: WdkAllocator = WdkAllocator;
 
 /// Used because the WdkAllocator does not use layouts in deallocation, but the

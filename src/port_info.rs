@@ -30,7 +30,7 @@ use wdk_sys::{
 
 use crate::{
     port::{NewSerialPortErr, SerialPort, SerialPortIdentifier},
-    DEALLOC_LAYOUT, GLOBAL_ALLOCATOR,
+    DEALLOC_LAYOUT,
 };
 
 #[derive(Debug)]
@@ -83,7 +83,7 @@ impl SerialPortInfo {
         let buffer_layout = Layout::from_size_align(buf.len(), 1).unwrap();
         // SAFETY: This is safe because:
         //         The result is compared to null.
-        let buffer_ptr = unsafe { GLOBAL_ALLOCATOR.alloc(buffer_layout) } as *mut u16;
+        let buffer_ptr = unsafe { WdkAllocator.alloc(buffer_layout) } as *mut u16;
 
         if buffer_ptr.is_null() {
             return None;

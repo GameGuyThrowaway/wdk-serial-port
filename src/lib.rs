@@ -12,7 +12,6 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use wdk::nt_success;
-use wdk_alloc::WdkAllocator;
 use wdk_sys::{
     ntddk::{ExFreePool, IoGetDeviceInterfaces},
     GUID, NTSTATUS, PDEVICE_OBJECT, PZZWSTR,
@@ -23,8 +22,6 @@ pub mod port;
 pub mod port_info;
 
 use port_info::SerialPortInfo;
-
-static GLOBAL_ALLOCATOR: WdkAllocator = WdkAllocator;
 
 /// Used because the WdkAllocator does not use layouts in deallocation, but the
 /// trait requires them.

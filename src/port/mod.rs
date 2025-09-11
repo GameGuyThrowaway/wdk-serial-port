@@ -6,7 +6,7 @@ use core::{
 };
 
 use alloc::{boxed::Box, vec::Vec};
-use wdk::nt_success;
+use wdk::{nt_success, println};
 use wdk_alloc::WdkAllocator;
 use wdk_mutex::kmutex::KMutex;
 use wdk_sys::{
@@ -286,6 +286,12 @@ pub enum SendIRPErr {
     #[allow(dead_code)]
     CallDriverError(NTSTATUS),
 
+    // Read IRP Only Errors
+    BufferAllocError,
+
+    // Synchronous Only Errors
+    Timeout,
+
     // Async Only Errors
     FailedToCloneData,
     FailedToCreateIoStatus,
@@ -386,6 +392,16 @@ impl SerialPort {
     /// * `Ok()` - Upon success.
     /// * `Err(SendIRPErr)` - Otherwise.
     ///
+    /// # Details
+    ///
+    /// This function can't have a timeout parameter because the only
+    /// implementation would be on the KeWaitEvent, and terminating early would
+    /// leave the IRP incomplete, which means either the buffer is prematurely
+    /// freed (use after free), or its never freed (memory leak).
+    ///
+    /// Also we have to use a new buffer and not a pointer to the internal one
+    /// because the pointer to a slice on the internal one could become invalid.
+    ///
     fn read_blocking(&mut self, len: usize) -> Result<(), SendIRPErr> {
         let mut event = KEVENT::default();
         let mut io_status = IO_STATUS_BLOCK::default();
@@ -393,14 +409,16 @@ impl SerialPort {
         // SAFETY: This is safe because:
         //         1. `event` is guaranteed to be a valid KEVENT.
         unsafe {
-            KeInitializeEvent(&mut event, NotificationEvent, false as u8);
+            KeInitializeEvent(&mut event, NotificationEvent, false as BOOLEAN);
         }
 
-        let prev_end = self.read_buffer.len();
-        let new_end = prev_end + len;
-        self.read_buffer.resize(new_end, 0);
-
-        let data = &mut self.read_buffer[prev_end..new_end];
+        let buffer_layout = Layout::from_size_align(len, 1).unwrap();
+        // SAFETY: This is safe because:
+        //         The result is compared to nullptr before being dereferenced.
+        let buffer = unsafe { WdkAllocator.alloc_zeroed(buffer_layout) };
+        if buffer.is_null() {
+            return Err(SendIRPErr::BufferAllocError);
+        }
 
         // SAFETY: This is safe because:
         //         1. `device_object` is guaranteed to be a valid PDEVICE_OBJECT
@@ -415,7 +433,7 @@ impl SerialPort {
             IoBuildSynchronousFsdRequest(
                 IRP_MJ_READ,
                 self.device_object,
-                data.as_ptr() as *mut _,
+                buffer as PVOID,
                 len as u32,
                 null_mut(),
                 &mut event,
@@ -448,13 +466,33 @@ impl SerialPort {
             };
 
             if !nt_success(wait_status) {
+                // ERR: This is a memory leak. If we free the buffer, it's a
+                // Use After Free.
+                println!("[wdk-serial-port] Critical KeWait Error. Investigate immediately.");
                 return Err(SendIRPErr::WaitError(wait_status));
             }
         }
 
         if nt_success(driver_call_status) {
+            // SAFETY: This is safe because:
+            //         `buffer` is a WdkAllocator allocated buffer, with length
+            //         `len`.
+            let slice = unsafe { slice::from_raw_parts(buffer, len) };
+            self.read_buffer.extend(slice);
+            // SAFETY: This is safe because:
+            //         `buffer` is a WdkAllocator allocated buffer, with no more
+            //         live references (the wait was successful).
+            unsafe {
+                WdkAllocator.dealloc(buffer, buffer_layout);
+            }
             Ok(())
         } else {
+            // SAFETY: This is safe because:
+            //         `buffer` is a WdkAllocator allocated buffer, with no more
+            //         live references (the wait was successful).
+            unsafe {
+                WdkAllocator.dealloc(buffer, buffer_layout);
+            }
             Err(SendIRPErr::CallDriverError(driver_call_status))
         }
     }
@@ -487,7 +525,7 @@ impl SerialPort {
         // SAFETY: This is safe because:
         //         1. `event` is guaranteed to be a valid KEVENT.
         unsafe {
-            KeInitializeEvent(&mut event, NotificationEvent, false as u8);
+            KeInitializeEvent(&mut event, NotificationEvent, false as BOOLEAN);
         }
 
         // SAFETY: This is safe because:

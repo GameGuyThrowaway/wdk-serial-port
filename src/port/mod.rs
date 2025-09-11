@@ -14,9 +14,9 @@ use wdk_sys::{
         ExQueueWorkItem, IoBuildDeviceIoControlRequest, IoBuildSynchronousFsdRequest,
         IofCallDriver, KeInitializeEvent, KeWaitForSingleObject, ObfDereferenceObject, ZwClose,
     },
-    BOOLEAN, DO_DIRECT_IO, HANDLE, IO_STATUS_BLOCK, IRP_MJ_READ, IRP_MJ_WRITE, KEVENT, NTSTATUS,
-    PDEVICE_OBJECT, PFILE_OBJECT, PIO_STATUS_BLOCK, PIRP, PVOID, PWORK_QUEUE_ITEM, STATUS_PENDING,
-    STATUS_SUCCESS, WORK_QUEUE_ITEM,
+    BOOLEAN, DO_DIRECT_IO, HANDLE, IO_STATUS_BLOCK, IRP_MJ_FLUSH_BUFFERS, IRP_MJ_READ,
+    IRP_MJ_WRITE, KEVENT, NTSTATUS, PDEVICE_OBJECT, PFILE_OBJECT, PIO_STATUS_BLOCK, PIRP, PVOID,
+    PWORK_QUEUE_ITEM, STATUS_PENDING, STATUS_SUCCESS, WORK_QUEUE_ITEM,
     _EVENT_TYPE::NotificationEvent,
     _KWAIT_REASON::Executive,
     _MODE::KernelMode,
@@ -374,6 +374,82 @@ impl SerialPort {
 
         if nt_success(driver_call_status) {
             Ok(io_status.Information as usize)
+        } else {
+            Err(SendIRPErr::CallDriverError(driver_call_status))
+        }
+    }
+
+    ///
+    /// `flush` flushes the outgoing data on a port, blocking until the flush
+    /// completes.
+    ///
+    /// # Return value:
+    ///
+    /// * `Ok(())` - Upon successful flushing.
+    /// * `Err(SendIRPErr)` - Otherwise.
+    ///
+    pub fn flush(&self) -> Result<(), SendIRPErr> {
+        let mut event = KEVENT::default();
+        let mut io_status = IO_STATUS_BLOCK::default();
+
+        // SAFETY: This is safe because:
+        //         1. `event` is guaranteed to be a valid KEVENT.
+        unsafe {
+            KeInitializeEvent(&mut event, NotificationEvent, false as u8);
+        }
+
+        // SAFETY: This is safe because:
+        //         1. `device_object` is guaranteed to be a valid PDEVICE_OBJECT
+        //            by the invariant in the field definition.
+        //         2. Buffer is a pointer to a buffer with len = Length.
+        //         3. StartingOffset is allowed to be null.
+        //         4. `event` is a valid initialized KEVENT.
+        //         5. `io_status` is a valid IO_STATUS_BLOCK.
+        //         6. `data` will live longer than this request (event is waited
+        //            before returning).
+        let irp = unsafe {
+            IoBuildSynchronousFsdRequest(
+                IRP_MJ_FLUSH_BUFFERS,
+                self.device_object,
+                null_mut(),
+                0,
+                null_mut(),
+                &mut event,
+                &mut io_status,
+            )
+        };
+
+        if irp.is_null() {
+            return Err(SendIRPErr::IRPBuildError);
+        }
+
+        // SAFETY: This is safe because:
+        //         1. `device_object` is guaranteed to be a valid PDEVICE_OBJECT
+        //            by the invariant in the field definition.
+        //         2. `irp` is guaranteed to be a valid IRP because it isn't
+        //            null, and was returned by IoBuildSynchronousFsdRequest.
+        let driver_call_status = unsafe { IofCallDriver(self.device_object, irp) };
+        if driver_call_status == STATUS_PENDING {
+            // SAFETY: This is safe because:
+            //         1. `event` is a valid KEVENT.
+            //         2. Timeout is allowed to be null.
+            let wait_status = unsafe {
+                KeWaitForSingleObject(
+                    &mut event as *mut KEVENT as *mut _,
+                    Executive,
+                    KernelMode as i8,
+                    false as u8,
+                    null_mut(),
+                )
+            };
+
+            if !nt_success(wait_status) {
+                return Err(SendIRPErr::WaitError(wait_status));
+            }
+        }
+
+        if nt_success(driver_call_status) {
+            Ok(())
         } else {
             Err(SendIRPErr::CallDriverError(driver_call_status))
         }

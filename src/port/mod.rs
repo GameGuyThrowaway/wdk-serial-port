@@ -383,7 +383,7 @@ impl SerialPort {
     /// `flush` flushes the outgoing data on a port, blocking until the flush
     /// completes.
     ///
-    /// # Return value:
+    /// # Return Value
     ///
     /// * `Ok(())` - Upon successful flushing.
     /// * `Err(SendIRPErr)` - Otherwise.
@@ -453,6 +453,30 @@ impl SerialPort {
         } else {
             Err(SendIRPErr::CallDriverError(driver_call_status))
         }
+    }
+
+    ///
+    /// `set_baud_rate` sets the port's baud rate.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `baud_rate` - The new baud rate.
+    /// 
+    /// # Return Value
+    /// 
+    /// * `Ok(())` - Upon success.
+    /// * `Err(SendIRPErr)` - Otherwise.
+    /// 
+    pub fn set_baud_rate(&mut self, baud_rate: u32) -> Result<(), SendIRPErr> {
+        self.send_ioctl_blocking(
+            IOCTL_SERIAL_SET_BAUD_RATE,
+            &baud_rate.to_le_bytes(),
+            &mut [],
+        )?;
+
+        self.baud_rate = baud_rate;
+
+        Ok(())
     }
 
     ///
@@ -843,12 +867,8 @@ impl SerialPort {
     /// * `Ok()` - Upon success.
     /// * `Err(SendIRPErr)` - Otherwise.
     ///
-    fn init(&self, baud_rate: u32) -> Result<(), SendIRPErr> {
-        self.send_ioctl_blocking(
-            IOCTL_SERIAL_SET_BAUD_RATE,
-            &baud_rate.to_le_bytes(),
-            &mut [],
-        )?;
+    fn init(&mut self, baud_rate: u32) -> Result<(), SendIRPErr> {
+        self.set_baud_rate(baud_rate)?;
 
         let line_control = SERIAL_LINE_CONTROL {
             StopBits: 0,

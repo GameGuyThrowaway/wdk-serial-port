@@ -300,6 +300,16 @@ pub enum SendIRPErr {
 
 impl SerialPort {
     ///
+    /// `get_read_buf` returns a non mutable reference to the port's read buf.
+    /// 
+    /// This is used to allow access, while prevent writing directly to the read
+    /// buf during callbacks.
+    /// 
+    pub fn get_read_buf<'a>(&'a self) -> &'a [u8] {
+        &self.read_buffer
+    }
+
+    ///
     /// `write_blocking` writes some data on a port, blocking until the write
     /// completes.
     ///
@@ -377,106 +387,6 @@ impl SerialPort {
         } else {
             Err(SendIRPErr::CallDriverError(driver_call_status))
         }
-    }
-
-    ///
-    /// `flush` flushes the outgoing data on a port, blocking until the flush
-    /// completes.
-    ///
-    /// # Return Value
-    ///
-    /// * `Ok(())` - Upon successful flushing.
-    /// * `Err(SendIRPErr)` - Otherwise.
-    ///
-    pub fn flush(&self) -> Result<(), SendIRPErr> {
-        let mut event = KEVENT::default();
-        let mut io_status = IO_STATUS_BLOCK::default();
-
-        // SAFETY: This is safe because:
-        //         1. `event` is guaranteed to be a valid KEVENT.
-        unsafe {
-            KeInitializeEvent(&mut event, NotificationEvent, false as u8);
-        }
-
-        // SAFETY: This is safe because:
-        //         1. `device_object` is guaranteed to be a valid PDEVICE_OBJECT
-        //            by the invariant in the field definition.
-        //         2. Buffer is a pointer to a buffer with len = Length.
-        //         3. StartingOffset is allowed to be null.
-        //         4. `event` is a valid initialized KEVENT.
-        //         5. `io_status` is a valid IO_STATUS_BLOCK.
-        //         6. `data` will live longer than this request (event is waited
-        //            before returning).
-        let irp = unsafe {
-            IoBuildSynchronousFsdRequest(
-                IRP_MJ_FLUSH_BUFFERS,
-                self.device_object,
-                null_mut(),
-                0,
-                null_mut(),
-                &mut event,
-                &mut io_status,
-            )
-        };
-
-        if irp.is_null() {
-            return Err(SendIRPErr::IRPBuildError);
-        }
-
-        // SAFETY: This is safe because:
-        //         1. `device_object` is guaranteed to be a valid PDEVICE_OBJECT
-        //            by the invariant in the field definition.
-        //         2. `irp` is guaranteed to be a valid IRP because it isn't
-        //            null, and was returned by IoBuildSynchronousFsdRequest.
-        let driver_call_status = unsafe { IofCallDriver(self.device_object, irp) };
-        if driver_call_status == STATUS_PENDING {
-            // SAFETY: This is safe because:
-            //         1. `event` is a valid KEVENT.
-            //         2. Timeout is allowed to be null.
-            let wait_status = unsafe {
-                KeWaitForSingleObject(
-                    &mut event as *mut KEVENT as *mut _,
-                    Executive,
-                    KernelMode as i8,
-                    false as u8,
-                    null_mut(),
-                )
-            };
-
-            if !nt_success(wait_status) {
-                return Err(SendIRPErr::WaitError(wait_status));
-            }
-        }
-
-        if nt_success(driver_call_status) {
-            Ok(())
-        } else {
-            Err(SendIRPErr::CallDriverError(driver_call_status))
-        }
-    }
-
-    ///
-    /// `set_baud_rate` sets the port's baud rate.
-    /// 
-    /// # Arguments
-    /// 
-    /// * `baud_rate` - The new baud rate.
-    /// 
-    /// # Return Value
-    /// 
-    /// * `Ok(())` - Upon success.
-    /// * `Err(SendIRPErr)` - Otherwise.
-    /// 
-    pub fn set_baud_rate(&mut self, baud_rate: u32) -> Result<(), SendIRPErr> {
-        self.send_ioctl_blocking(
-            IOCTL_SERIAL_SET_BAUD_RATE,
-            &baud_rate.to_le_bytes(),
-            &mut [],
-        )?;
-
-        self.baud_rate = baud_rate;
-
-        Ok(())
     }
 
     ///
@@ -595,6 +505,106 @@ impl SerialPort {
             }
             Err(SendIRPErr::CallDriverError(driver_call_status))
         }
+    }
+
+    ///
+    /// `flush` flushes the outgoing data on a port, blocking until the flush
+    /// completes.
+    ///
+    /// # Return Value
+    ///
+    /// * `Ok(())` - Upon successful flushing.
+    /// * `Err(SendIRPErr)` - Otherwise.
+    ///
+    pub fn flush(&self) -> Result<(), SendIRPErr> {
+        let mut event = KEVENT::default();
+        let mut io_status = IO_STATUS_BLOCK::default();
+
+        // SAFETY: This is safe because:
+        //         1. `event` is guaranteed to be a valid KEVENT.
+        unsafe {
+            KeInitializeEvent(&mut event, NotificationEvent, false as u8);
+        }
+
+        // SAFETY: This is safe because:
+        //         1. `device_object` is guaranteed to be a valid PDEVICE_OBJECT
+        //            by the invariant in the field definition.
+        //         2. Buffer is a pointer to a buffer with len = Length.
+        //         3. StartingOffset is allowed to be null.
+        //         4. `event` is a valid initialized KEVENT.
+        //         5. `io_status` is a valid IO_STATUS_BLOCK.
+        //         6. `data` will live longer than this request (event is waited
+        //            before returning).
+        let irp = unsafe {
+            IoBuildSynchronousFsdRequest(
+                IRP_MJ_FLUSH_BUFFERS,
+                self.device_object,
+                null_mut(),
+                0,
+                null_mut(),
+                &mut event,
+                &mut io_status,
+            )
+        };
+
+        if irp.is_null() {
+            return Err(SendIRPErr::IRPBuildError);
+        }
+
+        // SAFETY: This is safe because:
+        //         1. `device_object` is guaranteed to be a valid PDEVICE_OBJECT
+        //            by the invariant in the field definition.
+        //         2. `irp` is guaranteed to be a valid IRP because it isn't
+        //            null, and was returned by IoBuildSynchronousFsdRequest.
+        let driver_call_status = unsafe { IofCallDriver(self.device_object, irp) };
+        if driver_call_status == STATUS_PENDING {
+            // SAFETY: This is safe because:
+            //         1. `event` is a valid KEVENT.
+            //         2. Timeout is allowed to be null.
+            let wait_status = unsafe {
+                KeWaitForSingleObject(
+                    &mut event as *mut KEVENT as *mut _,
+                    Executive,
+                    KernelMode as i8,
+                    false as u8,
+                    null_mut(),
+                )
+            };
+
+            if !nt_success(wait_status) {
+                return Err(SendIRPErr::WaitError(wait_status));
+            }
+        }
+
+        if nt_success(driver_call_status) {
+            Ok(())
+        } else {
+            Err(SendIRPErr::CallDriverError(driver_call_status))
+        }
+    }
+
+    ///
+    /// `set_baud_rate` sets the port's baud rate.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `baud_rate` - The new baud rate.
+    /// 
+    /// # Return Value
+    /// 
+    /// * `Ok(())` - Upon success.
+    /// * `Err(SendIRPErr)` - Otherwise.
+    /// 
+    pub fn set_baud_rate(&mut self, baud_rate: u32) -> Result<(), SendIRPErr> {
+        self.send_ioctl_blocking(
+            IOCTL_SERIAL_SET_BAUD_RATE,
+            &baud_rate.to_le_bytes(),
+            &mut [],
+        )?;
+
+        self.baud_rate = baud_rate;
+
+        Ok(())
     }
 
     ///
@@ -1075,7 +1085,7 @@ impl SerialPort {
                 let bytes_available = serial_status.AmountInInQueue as usize;
 
                 if let Ok(_) = self.read_blocking(bytes_available) {
-                    let to_delete = read_callback(self, &self.read_buffer);
+                    let to_delete = read_callback(self);
                     let end_idx = to_delete.min(self.read_buffer.len());
                     self.read_buffer.drain(0..end_idx);
                 }
@@ -1102,10 +1112,13 @@ impl SerialPort {
 /// the callback to say how much data it has "consumed" (how much data can be
 /// deleted from the buffer).
 ///
+/// Users of this callback should call `port.get_read_buf()` to get the read
+/// buffer and available data. The buffer is not passed, because it is a member
+/// of the SerialPort struct, which is passed by mutable reference.
+///
 /// # Arguments
 ///
 /// * `port` - The serial port's that just received the data.
-/// * `data` - The serial port's data buffer, showing the total data read.
 ///
 /// # Return value:
 ///
@@ -1113,7 +1126,7 @@ impl SerialPort {
 /// serial port's data buffer, shifting the buffer left by `amount` bytes. The
 /// buffer's new 0th index will become data[amount].
 ///
-type AsyncReadCallback = fn(port: &SerialPort, data: &[u8]) -> usize;
+type AsyncReadCallback = fn(port: &mut SerialPort) -> usize;
 
 ///
 /// `TransmissionCompleteCallback` defines a completion routine called when the
@@ -1124,7 +1137,7 @@ type AsyncReadCallback = fn(port: &SerialPort, data: &[u8]) -> usize;
 ///
 /// * `port` - The serial port whose transmission buffer was just emptied.
 ///
-type TXEmptyCallback = fn(port: &SerialPort);
+type TXEmptyCallback = fn(port: &mut SerialPort);
 
 ///
 /// `wait_on_mask_callback` is the completion routine for the WAIT_ON_MASK

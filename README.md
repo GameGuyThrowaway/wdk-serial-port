@@ -142,8 +142,11 @@ fn read_async(port_info: &mut SerialPortInfo) {
     }
 }
 
-fn serial_read_handler(port: &SerialPort, data: &[u8]) -> usize {
+fn serial_read_handler(port: &mut SerialPort) -> usize {
     use alloc::string::String;
+
+    let data = port.get_read_buf();
+
     println!("Serial Read: {:?} | {}", data, String::from_utf8_lossy(&data));
 
     match port.write_blocking(data) {
@@ -195,7 +198,7 @@ fn loop_write(port_info: &mut SerialPortInfo) {
     }
 }
 
-fn flush_callback(port: &SerialPort) {
+fn flush_callback(port: &mut SerialPort) {
     match port.write_blocking(b"Hello World!") {
         Ok(len) => println!("Wrote {len} bytes"),
         Err(e) => println!("Failed to write any data: {:?}", e),

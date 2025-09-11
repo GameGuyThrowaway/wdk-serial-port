@@ -596,6 +596,10 @@ impl SerialPort {
     /// * `Err(SendIRPErr)` - Otherwise.
     /// 
     pub fn set_baud_rate(&mut self, baud_rate: u32) -> Result<(), SendIRPErr> {
+        if self.baud_rate == baud_rate {
+            return Ok(());
+        }
+
         self.send_ioctl_blocking(
             IOCTL_SERIAL_SET_BAUD_RATE,
             &baud_rate.to_le_bytes(),

@@ -8,7 +8,7 @@ use core::{
 use alloc::{boxed::Box, vec::Vec};
 use wdk::{nt_success, println};
 use wdk_alloc::WdkAllocator;
-use wdk_mutex::kmutex::KMutex;
+use wdk_mutex::kmutex::{KMutex, KMutexGuard};
 use wdk_sys::{
     ntddk::{
         ExQueueWorkItem, IoBuildDeviceIoControlRequest, IoBuildSynchronousFsdRequest,
@@ -275,6 +275,17 @@ impl SerialPort {
         unsafe {
             let _ = ZwClose(self.file_handle);
         }
+    }
+
+    ///
+    /// `get_identifier` returns the port's identifier.
+    /// 
+    /// # Return Value
+    /// 
+    /// * `Option<SerialPortIdentifier>` - The port's identifier.
+    /// 
+    pub fn get_identifier(&self) -> Option<SerialPortIdentifier> {
+        self.identifier
     }
 }
 
@@ -1096,17 +1107,30 @@ impl SerialPort {
             }
         }
     }
+}
 
-    ///
-    /// `handle_txempty_event` is a helper called when a SERIAL_SET_WAIT_MASK
-    /// completes, and the wait mask had TXEMPTY.
-    ///
-    /// This function simply calls the flush_callback.
-    ///
-    fn handle_txempty_event(&mut self) {
-        if let Some(flush_callback) = self.hardware_flush_callback {
-            flush_callback(self);
-        }
+///
+/// `handle_txempty_event` is a helper called when a SERIAL_SET_WAIT_MASK
+/// completes, and the wait mask had TXEMPTY.
+/// 
+/// This function simply calls the flush_callback.
+///
+/// This function is not defined within the SerialPort struct, as it needs to
+/// take ownership of the mutex so it can free it, which it can't do in a self
+/// call.
+/// 
+/// # Arguments
+/// 
+/// * `port` - The serial port whose TXEmpty event is being handled.
+///
+fn handle_txempty_event(port: KMutexGuard<'_, SerialPort>) {
+    if let Some(flush_callback) = port.hardware_flush_callback {
+        let identifier = match port.identifier {
+            Some(identifier) => identifier,
+            None => return,
+        };
+        drop(port);
+        flush_callback(identifier);
     }
 }
 
@@ -1136,12 +1160,18 @@ type AsyncReadCallback = fn(port: &mut SerialPort) -> usize;
 /// `TransmissionCompleteCallback` defines a completion routine called when the
 /// physical serial port finishes flushing its buffer. This is currently used
 /// for clocking, as it should run at the underlying USB clock rate.
+/// 
+/// Because of the application in the Ferrum driver, the port itself is not
+/// directly passed. The Ferrum driver uses the port indirectly to perform
+/// writes, and so it tries to re-lock it, leading to lockout. This can/should
+/// be changed in the future as necessary.
 ///
 /// # Arguments
 ///
-/// * `port` - The serial port whose transmission buffer was just emptied.
+/// * `port` - The serial port identifier whose transmission buffer was just
+///   emptied.
 ///
-type TXEmptyCallback = fn(port: &mut SerialPort);
+type TXEmptyCallback = fn(port: SerialPortIdentifier);
 
 ///
 /// `wait_on_mask_callback` is the completion routine for the WAIT_ON_MASK
@@ -1164,15 +1194,18 @@ type TXEmptyCallback = fn(port: &mut SerialPort);
 ///
 fn wait_on_mask_callback(identifier: SerialPortIdentifier, status: NTSTATUS, data: &[u8]) {
     if data.len() != 4 {
+        println!("[wdk-serial-port]: Invalid Length in Wait On Mask ({})", data.len());
         return;
     }
 
     let wait_mask = u32::from_le_bytes(data.try_into().unwrap());
     if (wait_mask & (SERIAL_EV_RXCHAR | SERIAL_EV_TXEMPTY)) == 0 {
+        println!("[wdk-serial-port]: Invalid Mask in Wait On Mask ({wait_mask})");
         return;
     }
 
     if !nt_success(status) {
+        println!("[wdk-serial-port]: Error in Wait On Mask ({status})");
         return;
     }
 
@@ -1281,7 +1314,7 @@ fn wait_on_mask_workitem_routine(context_ptr: PVOID) {
     }
 
     if (wait_mask & SERIAL_EV_TXEMPTY) != 0 {
-        port.handle_txempty_event();
+        handle_txempty_event(port);
     }
 }
 

@@ -198,8 +198,11 @@ fn loop_write(port_info: &mut SerialPortInfo) {
     }
 }
 
-fn flush_callback(port: &mut SerialPort) {
-    match port.write_blocking(b"Hello World!") {
+fn flush_callback(port: SerialPortIdentifier) {
+    let mutex_ptr = GlobalSerialPorts::get_port(identifier).unwrap();
+    let port_locked = unsafe { (*mutex_ptr).lock().unwrap() };
+
+    match port_locked.write_blocking(b"Hello World!") {
         Ok(len) => println!("Wrote {len} bytes"),
         Err(e) => println!("Failed to write any data: {:?}", e),
     }

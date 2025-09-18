@@ -12,11 +12,13 @@ use wdk_mutex::kmutex::{KMutex, KMutexGuard};
 use wdk_sys::{
     ntddk::{
         ExQueueWorkItem, IoBuildDeviceIoControlRequest, IoBuildSynchronousFsdRequest,
-        IofCallDriver, KeInitializeEvent, KeWaitForSingleObject, ObfDereferenceObject, ZwClose,
+        IofCallDriver, KeGetCurrentIrql, KeInitializeEvent, KeQuerySystemTimePrecise,
+        KeWaitForSingleObject, ObfDereferenceObject, ZwClose,
     },
     BOOLEAN, DO_DIRECT_IO, HANDLE, IO_STATUS_BLOCK, IRP_MJ_FLUSH_BUFFERS, IRP_MJ_READ,
-    IRP_MJ_WRITE, KEVENT, NTSTATUS, PDEVICE_OBJECT, PFILE_OBJECT, PIO_STATUS_BLOCK, PIRP, PVOID,
-    PWORK_QUEUE_ITEM, STATUS_PENDING, STATUS_SUCCESS, WORK_QUEUE_ITEM,
+    IRP_MJ_WRITE, KEVENT, LARGE_INTEGER, NTSTATUS, PASSIVE_LEVEL, PDEVICE_OBJECT, PFILE_OBJECT,
+    PIO_STATUS_BLOCK, PIRP, PVOID, PWORK_QUEUE_ITEM, STATUS_PENDING, STATUS_SUCCESS,
+    WORK_QUEUE_ITEM,
     _EVENT_TYPE::NotificationEvent,
     _KWAIT_REASON::Executive,
     _MODE::KernelMode,
@@ -279,11 +281,11 @@ impl SerialPort {
 
     ///
     /// `get_identifier` returns the port's identifier.
-    /// 
+    ///
     /// # Return Value
-    /// 
+    ///
     /// * `Option<SerialPortIdentifier>` - The port's identifier.
-    /// 
+    ///
     pub fn get_identifier(&self) -> Option<SerialPortIdentifier> {
         self.identifier
     }
@@ -312,10 +314,10 @@ pub enum SendIRPErr {
 impl SerialPort {
     ///
     /// `get_read_buf` returns a non mutable reference to the port's read buf.
-    /// 
+    ///
     /// This is used to allow access, while prevent writing directly to the read
     /// buf during callbacks.
-    /// 
+    ///
     pub fn get_read_buf<'a>(&'a self) -> &'a [u8] {
         &self.read_buffer
     }
@@ -596,16 +598,16 @@ impl SerialPort {
 
     ///
     /// `set_baud_rate` sets the port's baud rate.
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `baud_rate` - The new baud rate.
-    /// 
+    ///
     /// # Return Value
-    /// 
+    ///
     /// * `Ok(())` - Upon success.
     /// * `Err(SendIRPErr)` - Otherwise.
-    /// 
+    ///
     pub fn set_baud_rate(&mut self, baud_rate: u32) -> Result<(), SendIRPErr> {
         if self.baud_rate == baud_rate {
             return Ok(());
@@ -1088,15 +1090,15 @@ impl SerialPort {
     ///
     fn handle_rxchar_event(&mut self) {
         if let Some(read_callback) = self.async_read_callback {
-            let mut data = [0u8; size_of::<SERIAL_STATUS>()];
-            if let Ok(len_status) =
-                self.send_ioctl_blocking(IOCTL_SERIAL_GET_COMMSTATUS, &[], &mut data)
+            let mut commstatus_data = [0u8; size_of::<SERIAL_STATUS>()];
+            if let Ok(status) =
+                self.send_ioctl_blocking(IOCTL_SERIAL_GET_COMMSTATUS, &[], &mut commstatus_data)
             {
-                if !nt_success(len_status) {
+                if !nt_success(status) {
                     return;
                 }
 
-                let serial_status = SERIAL_STATUS::from_bytes(data);
+                let serial_status = SERIAL_STATUS::from_bytes(commstatus_data);
                 let bytes_available = serial_status.AmountInInQueue as usize;
 
                 if let Ok(_) = self.read_blocking(bytes_available) {
@@ -1112,15 +1114,15 @@ impl SerialPort {
 ///
 /// `handle_txempty_event` is a helper called when a SERIAL_SET_WAIT_MASK
 /// completes, and the wait mask had TXEMPTY.
-/// 
+///
 /// This function simply calls the flush_callback.
 ///
 /// This function is not defined within the SerialPort struct, as it needs to
 /// take ownership of the mutex so it can free it, which it can't do in a self
 /// call.
-/// 
+///
 /// # Arguments
-/// 
+///
 /// * `port` - The serial port whose TXEmpty event is being handled.
 ///
 fn handle_txempty_event(port: KMutexGuard<'_, SerialPort>) {
@@ -1160,7 +1162,7 @@ type AsyncReadCallback = fn(port: &mut SerialPort) -> usize;
 /// `TransmissionCompleteCallback` defines a completion routine called when the
 /// physical serial port finishes flushing its buffer. This is currently used
 /// for clocking, as it should run at the underlying USB clock rate.
-/// 
+///
 /// Because of the application in the Ferrum driver, the port itself is not
 /// directly passed. The Ferrum driver uses the port indirectly to perform
 /// writes, and so it tries to re-lock it, leading to lockout. This can/should
@@ -1194,7 +1196,10 @@ type TXEmptyCallback = fn(port: SerialPortIdentifier);
 ///
 fn wait_on_mask_callback(identifier: SerialPortIdentifier, status: NTSTATUS, data: &[u8]) {
     if data.len() != 4 {
-        println!("[wdk-serial-port]: Invalid Length in Wait On Mask ({})", data.len());
+        println!(
+            "[wdk-serial-port]: Invalid Length in Wait On Mask ({})",
+            data.len()
+        );
         return;
     }
 
@@ -1219,6 +1224,13 @@ fn wait_on_mask_callback(identifier: SerialPortIdentifier, status: NTSTATUS, dat
         context.port_identifier = identifier;
         context.wait_mask = wait_mask;
 
+        // SAFETY: This is safe beacuse:
+        //         The function is inherently safe.
+        //let irql = unsafe { KeGetCurrentIrql() };
+
+        //if irql == PASSIVE_LEVEL as u8 {
+        //    wait_on_mask_workitem_routine(context_ptr as PVOID);
+        //} else {
         // SAFETY: This is safe because:
         //         1. `WorkItem` is a valid PWORK_QUEUE_ITEM.
         //         2. `context_ptr` is a WdkAllocator allocated WorkItemContext,
@@ -1237,6 +1249,7 @@ fn wait_on_mask_callback(identifier: SerialPortIdentifier, status: NTSTATUS, dat
         unsafe {
             ExQueueWorkItem(&mut context.work_item as PWORK_QUEUE_ITEM, DelayedWorkQueue);
         }
+        //}
     }
 }
 
@@ -1280,6 +1293,7 @@ unsafe extern "C" fn wait_on_mask_workitem_routine_unsafe(context: PVOID) {
 ///
 fn wait_on_mask_workitem_routine(context_ptr: PVOID) {
     if context_ptr.is_null() {
+        println!("[wdk-serial-port]: Wait On Mask WI Null Context");
         return;
     }
 
@@ -1299,15 +1313,25 @@ fn wait_on_mask_workitem_routine(context_ptr: PVOID) {
         WdkAllocator.dealloc(context_ptr as *mut u8, DEALLOC_LAYOUT);
     }
 
-    let port_mutex = match GlobalSerialPorts::get_port(identifier) {
+    let port_mutex_ptr = match GlobalSerialPorts::get_port(identifier) {
         Some(port_mutex) => port_mutex,
-        None => return,
+        None => {
+            println!("[wdk-serial-port]: Port Unavailable");
+            return;
+        }
     };
 
     // SAFETY: This is safe because:
     //         `port_mutex` is a valid pointer, guaranteed by get_port.
-    let mut port = unsafe { (*port_mutex).lock().unwrap() };
-    let _ = port.send_async_wait_on_mask();
+    let port_mutex = unsafe { &*port_mutex_ptr };
+
+    let mut port = match port_mutex.lock() {
+        Ok(port) => port,
+        Err(err) => {
+            println!("[wdk-serial-port]: Failed to lock port mutex: {:?}", err);
+            return;
+        }
+    };
 
     if (wait_mask & SERIAL_EV_RXCHAR) != 0 {
         port.handle_rxchar_event();
@@ -1315,6 +1339,21 @@ fn wait_on_mask_workitem_routine(context_ptr: PVOID) {
 
     if (wait_mask & SERIAL_EV_TXEMPTY) != 0 {
         handle_txempty_event(port);
+    }
+
+    let mut port = match port_mutex.lock() {
+        Ok(port) => port,
+        Err(err) => {
+            println!("[wdk-serial-port]: Failed to lock port mutex2: {:?}", err);
+            return;
+        }
+    };
+
+    if let Err(err) = port.send_async_wait_on_mask() {
+        println!(
+            "[wdk-serial-port]: Failed to re-queue Wait On Mask: {:?}",
+            err
+        );
     }
 }
 

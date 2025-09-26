@@ -12,12 +12,12 @@ use wdk_mutex::kmutex::{KMutex, KMutexGuard};
 use wdk_sys::{
     ntddk::{
         ExQueueWorkItem, IoBuildDeviceIoControlRequest, IoBuildSynchronousFsdRequest,
-        IofCallDriver, KeGetCurrentIrql, KeInitializeEvent, KeQuerySystemTimePrecise,
-        KeWaitForSingleObject, ObfDereferenceObject, ZwClose,
+        IofCallDriver, KeGetCurrentIrql, KeInitializeEvent, KeWaitForSingleObject,
+        ObfDereferenceObject, ZwClose,
     },
     BOOLEAN, DO_DIRECT_IO, HANDLE, IO_STATUS_BLOCK, IRP_MJ_FLUSH_BUFFERS, IRP_MJ_READ,
-    IRP_MJ_WRITE, KEVENT, LARGE_INTEGER, NTSTATUS, PASSIVE_LEVEL, PDEVICE_OBJECT, PFILE_OBJECT,
-    PIO_STATUS_BLOCK, PIRP, PVOID, PWORK_QUEUE_ITEM, STATUS_PENDING, STATUS_SUCCESS,
+    IRP_MJ_WRITE, KEVENT, NTSTATUS, PASSIVE_LEVEL, PDEVICE_OBJECT, PFILE_OBJECT, PIO_STATUS_BLOCK,
+    PIRP, PVOID, PWORK_QUEUE_ITEM, STATUS_ACCESS_DENIED, STATUS_PENDING, STATUS_SUCCESS,
     WORK_QUEUE_ITEM,
     _EVENT_TYPE::NotificationEvent,
     _KWAIT_REASON::Executive,
@@ -175,6 +175,9 @@ pub struct SerialPort {
     /// The callback called when the serial port has fully flushed its write
     /// buffer. This value is set by calling `set_flush_callback`.
     hardware_flush_callback: Option<TXEmptyCallback>,
+    /// The callback called when the port disconnects, notifying all users of it
+    /// to handle any necessary cleanup in their code.
+    disconnect_callback: Option<DisconnectCallback>,
     /// The buffer used to store data until the callback fully processes it.
     /// This buffer basically holds context for when the callback can't entirely
     /// finish processing.
@@ -228,6 +231,7 @@ impl SerialPort {
             baud_rate,
             async_read_callback: None,
             hardware_flush_callback: None,
+            disconnect_callback: None,
             read_buffer: Vec::with_capacity(READ_BUFFER_CAPACITY),
             identifier: None,
         };
@@ -1059,6 +1063,20 @@ impl SerialPort {
     }
 
     ///
+    /// `set_disconnect_callback` sets the callback for when the serial port
+    /// physically disconnects from the computer. This callback is called at
+    /// IRQL_PASSIVE_LEVEL.
+    ///
+    /// # Arguments
+    ///
+    /// * `callback` - A function to call when the serial port disconnects. This
+    /// function will always be called at IRQL_PASSIVE_LEVEL.
+    ///
+    pub fn set_disconnect_callback(&mut self, callback: DisconnectCallback) {
+        self.disconnect_callback = Some(callback);
+    }
+
+    ///
     /// `start_wait_on_mask` begins/repeats the SERIAL_WAIT_ON_MASK loop, which
     /// is a cyclic async IOCTL, where a new IOCTL is queued after one
     /// completes.
@@ -1137,6 +1155,29 @@ fn handle_txempty_event(port: KMutexGuard<'_, SerialPort>) {
 }
 
 ///
+/// `handle_disconnect` is called when the SerialPort detects the port device as
+/// disconnected. This function takes ownership over and frees the port,
+/// notifying any users via a callback.
+///
+/// This function is not defined within the SerialPort struct, as it needs to
+/// take ownership of the mutex so it can free it, which it can't do in a self
+/// call.
+///
+/// # Arguments
+///
+/// * `port` - The serial port that just disconnected.
+///
+fn handle_disconnect(port: KMutexGuard<'_, SerialPort>) {
+    if let Some(disconnect_callback) = port.disconnect_callback {
+        disconnect_callback(&port);
+    }
+    if let Some(identifier) = port.identifier {
+        drop(port);
+        GlobalSerialPorts::close_port(identifier);
+    }
+}
+
+///
 /// `AsyncReadCallback` defines a completion routine called when an asynchronous
 /// read finishes on the serial port. It gives data to the callback, and expects
 /// the callback to say how much data it has "consumed" (how much data can be
@@ -1174,6 +1215,18 @@ type AsyncReadCallback = fn(port: &mut SerialPort) -> usize;
 ///   emptied.
 ///
 type TXEmptyCallback = fn(port: SerialPortIdentifier);
+
+///
+/// `DisconnectCallback` defines a completion routine called when the physical
+/// serial port disconnects. This is used to alert all port users (who interact
+/// through other callbacks) that they can clean up and remove the device on
+/// their end.
+///
+/// # Arguments
+///
+/// * `port` - The serial port identifier that just disconnected.
+///
+type DisconnectCallback = fn(port: &KMutexGuard<'_, SerialPort>);
 
 ///
 /// `wait_on_mask_callback` is the completion routine for the WAIT_ON_MASK
@@ -1226,30 +1279,29 @@ fn wait_on_mask_callback(identifier: SerialPortIdentifier, status: NTSTATUS, dat
 
         // SAFETY: This is safe beacuse:
         //         The function is inherently safe.
-        //let irql = unsafe { KeGetCurrentIrql() };
+        let irql = unsafe { KeGetCurrentIrql() };
+        if irql == PASSIVE_LEVEL as u8 {
+            wait_on_mask_workitem_routine(context_ptr as PVOID);
+        } else {
+            // SAFETY: This is safe because:
+            //         1. `WorkItem` is a valid PWORK_QUEUE_ITEM.
+            //         2. `context_ptr` is a WdkAllocator allocated WorkItemContext,
+            //            as required by the invariant defined in
+            //            `rxchar_workitem_routine`.
+            unsafe {
+                ExInitializeWorkItem(
+                    &mut context.work_item as PWORK_QUEUE_ITEM,
+                    Some(wait_on_mask_workitem_routine_unsafe),
+                    context_ptr as PVOID,
+                );
+            }
 
-        //if irql == PASSIVE_LEVEL as u8 {
-        //    wait_on_mask_workitem_routine(context_ptr as PVOID);
-        //} else {
-        // SAFETY: This is safe because:
-        //         1. `WorkItem` is a valid PWORK_QUEUE_ITEM.
-        //         2. `context_ptr` is a WdkAllocator allocated WorkItemContext,
-        //            as required by the invariant defined in
-        //            `rxchar_workitem_routine`.
-        unsafe {
-            ExInitializeWorkItem(
-                &mut context.work_item as PWORK_QUEUE_ITEM,
-                Some(wait_on_mask_workitem_routine_unsafe),
-                context_ptr as PVOID,
-            );
+            // SAFETY: This is safe because:
+            //         `WorkItem` is a valid PWORK_QUEUE_ITEM.
+            unsafe {
+                ExQueueWorkItem(&mut context.work_item as PWORK_QUEUE_ITEM, DelayedWorkQueue);
+            }
         }
-
-        // SAFETY: This is safe because:
-        //         `WorkItem` is a valid PWORK_QUEUE_ITEM.
-        unsafe {
-            ExQueueWorkItem(&mut context.work_item as PWORK_QUEUE_ITEM, DelayedWorkQueue);
-        }
-        //}
     }
 }
 
@@ -1354,6 +1406,12 @@ fn wait_on_mask_workitem_routine(context_ptr: PVOID) {
             "[wdk-serial-port]: Failed to re-queue Wait On Mask: {:?}",
             err
         );
+
+        if let SendIRPErr::CallDriverError(status) = err {
+            if status == STATUS_ACCESS_DENIED {
+                handle_disconnect(port);
+            }
+        }
     }
 }
 

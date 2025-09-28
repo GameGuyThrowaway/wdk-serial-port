@@ -29,13 +29,20 @@ use port_info::SerialPortInfo;
 /// either (because ExAllocatePool2 doesn't use it either).
 static DEALLOC_LAYOUT: Layout = Layout::new::<u8>();
 
-const PORT_CLASS_GUID: GUID = GUID {
-    Data1: 0x4d36e978,
-    Data2: 0xe325,
-    Data3: 0x11ce,
-    Data4: [0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18],
+/// GUID_DEVINTERFACE_COMPORT
+///
+/// GUID_DEVCLASS_PORTS is no longer used for port enumeration, as I realized
+/// that the DEVINTERFACE class was more fitting. Seemingly all devices
+/// implement GUID_DEVINTERFACE_COMPORT, while only a subset of those work with
+/// GUID_DEVCLASS_PORTS.
+const COMPORT_CLASS_GUID: GUID = GUID {
+    Data1: 0x86E0D1E0,
+    Data2: 0x8089,
+    Data3: 0x11D0,
+    Data4: [0x9C, 0xE4, 0x08, 0x00, 0x3E, 0x30, 0x1F, 0x73],
 };
 
+/// GUID_DEVINTERFACE_USB_DEVICE
 const USB_CLASS_GUID: GUID = GUID {
     Data1: 0xA5DCBF10,
     Data2: 0x6530,
@@ -62,7 +69,7 @@ pub fn list_com_ports() -> Result<Vec<SerialPortInfo>, NTSTATUS> {
     //         2. `symbolic_link_list` is allowed to be null.
     let interfaces_status = unsafe {
         IoGetDeviceInterfaces(
-            &PORT_CLASS_GUID,
+            &COMPORT_CLASS_GUID,
             device,
             0,
             &mut symbolic_link_list as *mut PZZWSTR,

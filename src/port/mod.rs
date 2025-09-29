@@ -1248,9 +1248,9 @@ type DisconnectCallback = fn(port: &KMutexGuard<'_, SerialPort>);
 /// * `data` - The output data of the IOCTL request.
 ///
 fn wait_on_mask_callback(identifier: SerialPortIdentifier, status: NTSTATUS, data: &[u8]) {
-    if data.len() != 4 {
+    if data.len() != size_of::<u32>() {
         println!(
-            "[wdk-serial-port]: Invalid Length in Wait On Mask ({})",
+            "[wdk-serial-port]: Invalid Length in Wait On Mask ({}, {status})",
             data.len()
         );
         return;

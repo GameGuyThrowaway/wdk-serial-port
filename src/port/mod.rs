@@ -17,8 +17,8 @@ use wdk_sys::{
     },
     BOOLEAN, DO_DIRECT_IO, HANDLE, IO_STATUS_BLOCK, IRP_MJ_FLUSH_BUFFERS, IRP_MJ_READ,
     IRP_MJ_WRITE, KEVENT, NTSTATUS, PASSIVE_LEVEL, PDEVICE_OBJECT, PFILE_OBJECT, PIO_STATUS_BLOCK,
-    PIRP, PVOID, PWORK_QUEUE_ITEM, STATUS_ACCESS_DENIED, STATUS_PENDING, STATUS_SUCCESS,
-    WORK_QUEUE_ITEM,
+    PIRP, PVOID, PWORK_QUEUE_ITEM, STATUS_ACCESS_DENIED, STATUS_CANCELLED, STATUS_PENDING,
+    STATUS_SUCCESS, WORK_QUEUE_ITEM,
     _EVENT_TYPE::NotificationEvent,
     _KWAIT_REASON::Executive,
     _MODE::KernelMode,
@@ -35,7 +35,6 @@ use ioctl::{
 
 use crate::{
     misc::{ExInitializeWorkItem, IoSetCompletionRoutine},
-    port::ioctl::SERIAL_EV_TXEMPTY,
     DEALLOC_LAYOUT,
 };
 
@@ -172,9 +171,6 @@ pub struct SerialPort {
     /// calling `start_async_read_system`. When this value is Some, it means the
     /// async read system has started. Otherwise it has not started yet.
     async_read_callback: Option<AsyncReadCallback>,
-    /// The callback called when the serial port has fully flushed its write
-    /// buffer. This value is set by calling `set_flush_callback`.
-    hardware_flush_callback: Option<TXEmptyCallback>,
     /// The callback called when the port disconnects, notifying all users of it
     /// to handle any necessary cleanup in their code.
     disconnect_callback: Option<DisconnectCallback>,
@@ -230,7 +226,6 @@ impl SerialPort {
             file_handle,
             baud_rate,
             async_read_callback: None,
-            hardware_flush_callback: None,
             disconnect_callback: None,
             read_buffer: Vec::with_capacity(READ_BUFFER_CAPACITY),
             identifier: None,
@@ -993,14 +988,9 @@ impl SerialPort {
             return Ok(());
         }
 
-        let mut wait_mask = SERIAL_EV_RXCHAR;
-        if self.hardware_flush_callback.is_some() {
-            wait_mask |= SERIAL_EV_TXEMPTY;
-        }
-
         self.send_ioctl_blocking(
             IOCTL_SERIAL_SET_WAIT_MASK,
-            &wait_mask.to_le_bytes(),
+            &SERIAL_EV_RXCHAR.to_le_bytes(),
             &mut [],
         )?;
         self.async_read_callback = Some(callback);
@@ -1009,53 +999,6 @@ impl SerialPort {
         // restart it here.
         if let Err(e) = self.send_async_wait_on_mask() {
             self.async_read_callback = None;
-            return Err(e);
-        }
-
-        Ok(())
-    }
-
-    ///
-    /// `set_flush_callback` sets the callback for when the hardware flushes its
-    /// transmission buffer. This callback is called at IRQL_PASSIVE_LEVEL.
-    ///
-    /// The first time this function will call, it will start the wait on mask
-    /// system, and enable the TXEMPTY feature. All further calls will simply
-    /// change the callback.
-    ///
-    /// # Arguments
-    ///
-    /// * `callback` - A function to call when the serial port flushes its
-    /// transmission buffer. This function will always be called at
-    /// IRQL_PASSIVE_LEVEL.
-    ///
-    /// # Return value:
-    ///
-    /// * `Ok()` - Upon success.
-    /// * `Err(SendIRPErr)` - Otherwise.
-    ///
-    pub fn set_flush_callback(&mut self, callback: TXEmptyCallback) -> Result<(), SendIRPErr> {
-        if self.hardware_flush_callback.is_some() {
-            self.hardware_flush_callback = Some(callback);
-            return Ok(());
-        }
-
-        let mut wait_mask = SERIAL_EV_TXEMPTY;
-        if self.async_read_callback.is_some() {
-            wait_mask |= SERIAL_EV_RXCHAR;
-        }
-
-        self.send_ioctl_blocking(
-            IOCTL_SERIAL_SET_WAIT_MASK,
-            &wait_mask.to_le_bytes(),
-            &mut [],
-        )?;
-        self.hardware_flush_callback = Some(callback);
-
-        // IOCTL_SERIAL_SET_WAIT_MASK resets the async wait system, so we
-        // restart it here.
-        if let Err(e) = self.send_async_wait_on_mask() {
-            self.hardware_flush_callback = None;
             return Err(e);
         }
 
@@ -1130,31 +1073,6 @@ impl SerialPort {
 }
 
 ///
-/// `handle_txempty_event` is a helper called when a SERIAL_SET_WAIT_MASK
-/// completes, and the wait mask had TXEMPTY.
-///
-/// This function simply calls the flush_callback.
-///
-/// This function is not defined within the SerialPort struct, as it needs to
-/// take ownership of the mutex so it can free it, which it can't do in a self
-/// call.
-///
-/// # Arguments
-///
-/// * `port` - The serial port whose TXEmpty event is being handled.
-///
-fn handle_txempty_event(port: KMutexGuard<'_, SerialPort>) {
-    if let Some(flush_callback) = port.hardware_flush_callback {
-        let identifier = match port.identifier {
-            Some(identifier) => identifier,
-            None => return,
-        };
-        drop(port);
-        flush_callback(identifier);
-    }
-}
-
-///
 /// `handle_disconnect` is called when the SerialPort detects the port device as
 /// disconnected. This function takes ownership over and frees the port,
 /// notifying any users via a callback.
@@ -1200,23 +1118,6 @@ fn handle_disconnect(port: KMutexGuard<'_, SerialPort>) {
 type AsyncReadCallback = fn(port: &mut SerialPort) -> usize;
 
 ///
-/// `TransmissionCompleteCallback` defines a completion routine called when the
-/// physical serial port finishes flushing its buffer. This is currently used
-/// for clocking, as it should run at the underlying USB clock rate.
-///
-/// Because of the application in the Ferrum driver, the port itself is not
-/// directly passed. The Ferrum driver uses the port indirectly to perform
-/// writes, and so it tries to re-lock it, leading to lockout. This can/should
-/// be changed in the future as necessary.
-///
-/// # Arguments
-///
-/// * `port` - The serial port identifier whose transmission buffer was just
-///   emptied.
-///
-type TXEmptyCallback = fn(port: SerialPortIdentifier);
-
-///
 /// `DisconnectCallback` defines a completion routine called when the physical
 /// serial port disconnects. This is used to alert all port users (who interact
 /// through other callbacks) that they can clean up and remove the device on
@@ -1232,7 +1133,7 @@ type DisconnectCallback = fn(port: &KMutexGuard<'_, SerialPort>);
 /// `wait_on_mask_callback` is the completion routine for the WAIT_ON_MASK
 /// serial IOCTL.
 ///
-/// It is currently only used for the RXCHAR and TXEMPTY features.
+/// It is currently only used for the RXCHAR feature.
 ///
 /// This is called at <= IRQL_DISPATCH_LEVEL, as per `send_ioctl_async`, and so
 /// is a wrapper around a worker item, which handles all port processing, due to
@@ -1248,6 +1149,10 @@ type DisconnectCallback = fn(port: &KMutexGuard<'_, SerialPort>);
 /// * `data` - The output data of the IOCTL request.
 ///
 fn wait_on_mask_callback(identifier: SerialPortIdentifier, status: NTSTATUS, data: &[u8]) {
+    if status == STATUS_CANCELLED {
+        return;
+    }
+
     if data.len() != size_of::<u32>() {
         println!(
             "[wdk-serial-port]: Invalid Length in Wait On Mask ({}, {status})",
@@ -1257,7 +1162,7 @@ fn wait_on_mask_callback(identifier: SerialPortIdentifier, status: NTSTATUS, dat
     }
 
     let wait_mask = u32::from_le_bytes(data.try_into().unwrap());
-    if (wait_mask & (SERIAL_EV_RXCHAR | SERIAL_EV_TXEMPTY)) == 0 {
+    if (wait_mask & SERIAL_EV_RXCHAR) == 0 {
         println!("[wdk-serial-port]: Invalid Mask in Wait On Mask ({wait_mask})");
         return;
     }
@@ -1326,9 +1231,9 @@ unsafe extern "C" fn wait_on_mask_workitem_routine_unsafe(context: PVOID) {
 
 ///
 /// `wait_on_mask_workitem_routine` is the callback function for a WAIT_ON_MASK
-/// ioctl's WorkItem being ran. This function allows the necessary RXCHAR and
-/// TXEMPTY callback behavior to be handled at IRQL_PASSIVE_LEVEL. Its behavior
-/// matches the invariant described by the ExQueueWorkItem call in
+/// ioctl's WorkItem being ran. This function allows the necessary RXCHAR
+/// callback behavior to be handled at IRQL_PASSIVE_LEVEL. Its behavior matches
+/// the invariant described by the ExQueueWorkItem call in
 /// `wait_on_mask_callback`.
 ///
 /// Because this function is only called from a work item queue finishing, it
@@ -1388,18 +1293,6 @@ fn wait_on_mask_workitem_routine(context_ptr: PVOID) {
     if (wait_mask & SERIAL_EV_RXCHAR) != 0 {
         port.handle_rxchar_event();
     }
-
-    if (wait_mask & SERIAL_EV_TXEMPTY) != 0 {
-        handle_txempty_event(port);
-    }
-
-    let mut port = match port_mutex.lock() {
-        Ok(port) => port,
-        Err(err) => {
-            println!("[wdk-serial-port]: Failed to lock port mutex2: {:?}", err);
-            return;
-        }
-    };
 
     if let Err(err) = port.send_async_wait_on_mask() {
         println!(

@@ -93,6 +93,19 @@ impl GlobalSerialPorts {
     }
 
     ///
+    /// `has_port` returns whether the GlobalSerialPorts manager has a port by
+    /// its identifier. Note that identifiers are re-used over time, so the
+    /// return value may be unexpected.
+    ///
+    pub fn has_port(id: SerialPortIdentifier) -> bool {
+        if id.port_idx >= MAX_OPEN_PORTS {
+            return false;
+        }
+
+        !OPEN_PORTS[id.port_idx].load(PORT_ORDERING).is_null()
+    }
+
+    ///
     /// Attempts to close a port by its identifier.
     ///
     /// TODO: Should I add a status return in case the port wasn't found or
@@ -1130,6 +1143,91 @@ type AsyncReadCallback = fn(port: &mut SerialPort) -> usize;
 type DisconnectCallback = fn(port: &KMutexGuard<'_, SerialPort>);
 
 ///
+/// Context necessary to re-queue a WAIT_ON_MASK IOCTL for a port.
+///
+struct WOMReQeueueWorkItemContext {
+    work_item: WORK_QUEUE_ITEM,
+
+    port_identifier: SerialPortIdentifier,
+}
+
+///
+/// A wrapper around the `wom_requeue_workitem_routine`, which ensures safety.
+///
+unsafe extern "C" fn wom_requeue_workitem_routine_unsafe(context: PVOID) {
+    wom_requeue_workitem_routine(context)
+}
+
+///
+/// `wom_requeue_workitem_routine` is the callback function for when a
+/// WAIT_ON_MASK ioctl finishes in the cancelled state, requiring a re-queue.
+/// This work item is used because the original routine cannot re-queue at its
+/// IRQL.
+///
+/// Because this function is only called from a work item queue finishing, it
+/// runs at IRQL_PASSIVE_LEVEL.
+///
+/// # Arguments:
+///
+/// * `context_ptr` - A valid WOMReQeueueWorkItemContext pointer, as per the
+///   ExQueueWorkItem call in `wait_on_mask_callback`.
+///
+unsafe extern "C" fn wom_requeue_workitem_routine(context_ptr: PVOID) {
+    if context_ptr.is_null() {
+        println!("[wdk-serial-port]: Wait On Mask WI Null Context");
+        return;
+    }
+
+    // SAFETY: This is safe because:
+    //         `context_ptr` is a valid WOMReQeueueWorkItemContext, as per the
+    //         ExQueueWorkItem call in `wait_on_mask_callback`.
+    let context = unsafe { &*(context_ptr as *mut WOMReQeueueWorkItemContext) };
+
+    let identifier = context.port_identifier;
+
+    // SAFETY: This is safe because:
+    //         `context_ptr` is a valid WdkAllocator allocated
+    //         WaitOnMaskWorkItemContext, as per the ExQueueWorkItem call in
+    //         `wait_on_mask_callback`.
+    unsafe {
+        WdkAllocator.dealloc(context_ptr as *mut u8, DEALLOC_LAYOUT);
+    }
+
+    let port_mutex_ptr = match GlobalSerialPorts::get_port(identifier) {
+        Some(port_mutex) => port_mutex,
+        None => {
+            println!("[wdk-serial-port]: Port Had Closed");
+            return;
+        }
+    };
+
+    // SAFETY: This is safe because:
+    //         `port_mutex` is a valid pointer, guaranteed by get_port.
+    let port_mutex = unsafe { &*port_mutex_ptr };
+
+    let mut port = match port_mutex.lock() {
+        Ok(port) => port,
+        Err(err) => {
+            println!("[wdk-serial-port]: Failed to lock port mutex: {:?}", err);
+            return;
+        }
+    };
+
+    if let Err(err) = port.send_async_wait_on_mask() {
+        println!(
+            "[wdk-serial-port]: Failed to re-queue Wait On Mask: {:?}",
+            err
+        );
+
+        if let SendIRPErr::CallDriverError(status) = err {
+            if status == STATUS_ACCESS_DENIED {
+                handle_disconnect(port);
+            }
+        }
+    }
+}
+
+///
 /// `wait_on_mask_callback` is the completion routine for the WAIT_ON_MASK
 /// serial IOCTL.
 ///
@@ -1150,6 +1248,43 @@ type DisconnectCallback = fn(port: &KMutexGuard<'_, SerialPort>);
 ///
 fn wait_on_mask_callback(identifier: SerialPortIdentifier, status: NTSTATUS, data: &[u8]) {
     if status == STATUS_CANCELLED {
+        println!("[wdk-serial-port]: Cancelled WOM found");
+        if !GlobalSerialPorts::has_port(identifier) {
+            println!("[wdk-serial-port]: Port Had Closed");
+            return;
+        }
+
+        let context_layout = Layout::new::<WOMReQeueueWorkItemContext>();
+        let context_ptr =
+            unsafe { WdkAllocator.alloc_zeroed(context_layout) as *mut WOMReQeueueWorkItemContext };
+        if context_ptr.is_null() {
+            return;
+        }
+
+        // SAFETY: This is safe because:
+        //         `context_ptr` is a valid pointer.
+        let context = unsafe { &mut *context_ptr };
+        context.port_identifier = identifier;
+
+        // SAFETY: This is safe because:
+        //         1. `WorkItem` is a valid PWORK_QUEUE_ITEM.
+        //         2. `context_ptr` is a WdkAllocator allocated WorkItemContext,
+        //            as required by the invariant defined in
+        //            `rxchar_workitem_routine`.
+        unsafe {
+            ExInitializeWorkItem(
+                &mut context.work_item as PWORK_QUEUE_ITEM,
+                Some(wom_requeue_workitem_routine_unsafe),
+                context_ptr as PVOID,
+            );
+        }
+
+        // SAFETY: This is safe because:
+        //         `WorkItem` is a valid PWORK_QUEUE_ITEM.
+        unsafe {
+            ExQueueWorkItem(&mut context.work_item as PWORK_QUEUE_ITEM, DelayedWorkQueue);
+        }
+
         return;
     }
 
@@ -1175,37 +1310,39 @@ fn wait_on_mask_callback(identifier: SerialPortIdentifier, status: NTSTATUS, dat
     let context_layout = Layout::new::<WaitOnMaskWorkItemContext>();
     let context_ptr =
         unsafe { WdkAllocator.alloc_zeroed(context_layout) as *mut WaitOnMaskWorkItemContext };
-    if !context_ptr.is_null() {
+    if context_ptr.is_null() {
+        return;
+    }
+
+    // SAFETY: This is safe because:
+    //         `context_ptr` is a valid pointer.
+    let context = unsafe { &mut *context_ptr };
+    context.port_identifier = identifier;
+    context.wait_mask = wait_mask;
+
+    // SAFETY: This is safe beacuse:
+    //         The function is inherently safe.
+    let irql = unsafe { KeGetCurrentIrql() };
+    if irql == PASSIVE_LEVEL as u8 {
+        wait_on_mask_workitem_routine(context_ptr as PVOID);
+    } else {
         // SAFETY: This is safe because:
-        //         `context_ptr` is a valid pointer.
-        let context = unsafe { &mut *context_ptr };
-        context.port_identifier = identifier;
-        context.wait_mask = wait_mask;
+        //         1. `WorkItem` is a valid PWORK_QUEUE_ITEM.
+        //         2. `context_ptr` is a WdkAllocator allocated WorkItemContext,
+        //            as required by the invariant defined in
+        //            `rxchar_workitem_routine`.
+        unsafe {
+            ExInitializeWorkItem(
+                &mut context.work_item as PWORK_QUEUE_ITEM,
+                Some(wait_on_mask_workitem_routine_unsafe),
+                context_ptr as PVOID,
+            );
+        }
 
-        // SAFETY: This is safe beacuse:
-        //         The function is inherently safe.
-        let irql = unsafe { KeGetCurrentIrql() };
-        if irql == PASSIVE_LEVEL as u8 {
-            wait_on_mask_workitem_routine(context_ptr as PVOID);
-        } else {
-            // SAFETY: This is safe because:
-            //         1. `WorkItem` is a valid PWORK_QUEUE_ITEM.
-            //         2. `context_ptr` is a WdkAllocator allocated WorkItemContext,
-            //            as required by the invariant defined in
-            //            `rxchar_workitem_routine`.
-            unsafe {
-                ExInitializeWorkItem(
-                    &mut context.work_item as PWORK_QUEUE_ITEM,
-                    Some(wait_on_mask_workitem_routine_unsafe),
-                    context_ptr as PVOID,
-                );
-            }
-
-            // SAFETY: This is safe because:
-            //         `WorkItem` is a valid PWORK_QUEUE_ITEM.
-            unsafe {
-                ExQueueWorkItem(&mut context.work_item as PWORK_QUEUE_ITEM, DelayedWorkQueue);
-            }
+        // SAFETY: This is safe because:
+        //         `WorkItem` is a valid PWORK_QUEUE_ITEM.
+        unsafe {
+            ExQueueWorkItem(&mut context.work_item as PWORK_QUEUE_ITEM, DelayedWorkQueue);
         }
     }
 }

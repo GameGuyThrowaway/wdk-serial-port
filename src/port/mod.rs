@@ -1174,7 +1174,7 @@ unsafe extern "C" fn wom_requeue_workitem_routine_unsafe(context: PVOID) {
 ///
 unsafe extern "C" fn wom_requeue_workitem_routine(context_ptr: PVOID) {
     if context_ptr.is_null() {
-        println!("[wdk-serial-port]: Wait On Mask WI Null Context");
+        println!("[wdk-serial-port]:WOM ReQueue WI Null Context");
         return;
     }
 
@@ -1196,7 +1196,7 @@ unsafe extern "C" fn wom_requeue_workitem_routine(context_ptr: PVOID) {
     let port_mutex_ptr = match GlobalSerialPorts::get_port(identifier) {
         Some(port_mutex) => port_mutex,
         None => {
-            println!("[wdk-serial-port]: Port Had Closed");
+            println!("[wdk-serial-port]: WOM ReQueue - Port Had Closed");
             return;
         }
     };
@@ -1248,9 +1248,9 @@ unsafe extern "C" fn wom_requeue_workitem_routine(context_ptr: PVOID) {
 ///
 fn wait_on_mask_callback(identifier: SerialPortIdentifier, status: NTSTATUS, data: &[u8]) {
     if status == STATUS_CANCELLED {
-        println!("[wdk-serial-port]: Cancelled WOM found");
+        //println!("[wdk-serial-port]: Cancelled WOM found");
         if !GlobalSerialPorts::has_port(identifier) {
-            println!("[wdk-serial-port]: Port Had Closed");
+            //println!("[wdk-serial-port]: Port Had Closed");
             return;
         }
 

@@ -13,9 +13,9 @@ kmdf-version-major = 1
 target-kmdf-version-minor = 33
 
 [dependencies]
-wdk = { git = "https://github.com/GameGuyThrowaway/windows-drivers-rs.git", branch = "wsk-bindings" }
-wdk-sys = { git = "https://github.com/GameGuyThrowaway/windows-drivers-rs.git", branch = "wsk-bindings" }
-wdk-alloc = { git = "https://github.com/GameGuyThrowaway/windows-drivers-rs.git", branch = "wsk-bindings" }
+wdk = { git = "https://github.com/GameGuyThrowaway/windows-drivers-rs.git", branch = "ferrum" }
+wdk-sys = { git = "https://github.com/GameGuyThrowaway/windows-drivers-rs.git", branch = "ferrum" }
+wdk-alloc = { git = "https://github.com/GameGuyThrowaway/windows-drivers-rs.git", branch = "ferrum" }
 wdk-mutex = { git = "https://github.com/GameGuyThrowaway/wdk-mutex.git" }
 
 [profile.dev]

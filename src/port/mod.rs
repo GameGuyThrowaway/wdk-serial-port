@@ -852,7 +852,7 @@ impl SerialPort {
         unsafe {
             IoSetCompletionRoutine(
                 irp,
-                Some(async_ioctl_completion_routine_unsafe),
+                Some(async_ioctl_completion_routine),
                 context_ptr as *mut _,
                 true as BOOLEAN,
                 true as BOOLEAN,
@@ -1152,13 +1152,6 @@ struct WOMReQeueueWorkItemContext {
 }
 
 ///
-/// A wrapper around the `wom_requeue_workitem_routine`, which ensures safety.
-///
-unsafe extern "C" fn wom_requeue_workitem_routine_unsafe(context: PVOID) {
-    wom_requeue_workitem_routine(context)
-}
-
-///
 /// `wom_requeue_workitem_routine` is the callback function for when a
 /// WAIT_ON_MASK ioctl finishes in the cancelled state, requiring a re-queue.
 /// This work item is used because the original routine cannot re-queue at its
@@ -1172,7 +1165,7 @@ unsafe extern "C" fn wom_requeue_workitem_routine_unsafe(context: PVOID) {
 /// * `context_ptr` - A valid WOMReQeueueWorkItemContext pointer, as per the
 ///   ExQueueWorkItem call in `wait_on_mask_callback`.
 ///
-unsafe extern "C" fn wom_requeue_workitem_routine(context_ptr: PVOID) {
+extern "C" fn wom_requeue_workitem_routine(context_ptr: PVOID) {
     if context_ptr.is_null() {
         println!("[wdk-serial-port]:WOM ReQueue WI Null Context");
         return;
@@ -1274,7 +1267,7 @@ fn wait_on_mask_callback(identifier: SerialPortIdentifier, status: NTSTATUS, dat
         unsafe {
             ExInitializeWorkItem(
                 &mut context.work_item as PWORK_QUEUE_ITEM,
-                Some(wom_requeue_workitem_routine_unsafe),
+                Some(wom_requeue_workitem_routine),
                 context_ptr as PVOID,
             );
         }
@@ -1334,7 +1327,7 @@ fn wait_on_mask_callback(identifier: SerialPortIdentifier, status: NTSTATUS, dat
         unsafe {
             ExInitializeWorkItem(
                 &mut context.work_item as PWORK_QUEUE_ITEM,
-                Some(wait_on_mask_workitem_routine_unsafe),
+                Some(wait_on_mask_workitem_routine),
                 context_ptr as PVOID,
             );
         }
@@ -1360,13 +1353,6 @@ struct WaitOnMaskWorkItemContext {
 }
 
 ///
-/// A wrapper around the `wait_on_mask_workitem_routine`, which ensures safety.
-///
-unsafe extern "C" fn wait_on_mask_workitem_routine_unsafe(context: PVOID) {
-    wait_on_mask_workitem_routine(context)
-}
-
-///
 /// `wait_on_mask_workitem_routine` is the callback function for a WAIT_ON_MASK
 /// ioctl's WorkItem being ran. This function allows the necessary RXCHAR
 /// callback behavior to be handled at IRQL_PASSIVE_LEVEL. Its behavior matches
@@ -1385,7 +1371,7 @@ unsafe extern "C" fn wait_on_mask_workitem_routine_unsafe(context: PVOID) {
 /// * `context_ptr` - A valid WaitOnMaskWorkItemContext pointer, as per the
 ///   ExQueueWorkItem call in `wait_on_mask_callback`.
 ///
-fn wait_on_mask_workitem_routine(context_ptr: PVOID) {
+extern "C" fn wait_on_mask_workitem_routine(context_ptr: PVOID) {
     if context_ptr.is_null() {
         println!("[wdk-serial-port]: Wait On Mask WI Null Context");
         return;
@@ -1469,17 +1455,6 @@ struct AsyncIOCTLContext {
 }
 
 ///
-/// A wrapper around the `async_ioctl_completion_routine`, which ensures safety.
-///
-unsafe extern "C" fn async_ioctl_completion_routine_unsafe(
-    device_object: PDEVICE_OBJECT,
-    irp: PIRP,
-    context_ptr: PVOID,
-) -> NTSTATUS {
-    async_ioctl_completion_routine(device_object, irp, context_ptr)
-}
-
-///
 /// `async_ioctl_completion_routine` is the completion routine for async serial
 /// port IOCTLs.
 ///
@@ -1506,7 +1481,7 @@ unsafe extern "C" fn async_ioctl_completion_routine_unsafe(
 ///
 /// * `NTSTATUS` - The status of the call. This should always be STATUS_SUCCESS.
 ///
-fn async_ioctl_completion_routine(
+extern "C" fn async_ioctl_completion_routine(
     device_object: PDEVICE_OBJECT,
     irp: PIRP,
     context_ptr: PVOID,

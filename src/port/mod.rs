@@ -159,10 +159,24 @@ pub struct SerialPortIdentifier {
 
 impl SerialPortIdentifier {
     ///
-    /// Creates a new SerialPortIdentifier from the underlying identifier data.
+    /// `from_port_idx` creates a new SerialPortIdentifier from the underlying
+    /// identifier data.
+    /// 
+    /// This is only public as hacked in support for the Ferrum Driver storing
+    /// the port ID. (see below)
     ///
-    fn from_port_idx(port_idx: usize) -> Self {
+    pub fn from_port_idx(port_idx: usize) -> Self {
         Self { port_idx }
+    }
+
+    ///
+    /// `get_port_idx` returns the SerialPortIdentifier's port index. This is
+    /// currently only hacked in so the Ferrum Driver can store the serial port
+    /// ID without needing to add a driver lib as a dependency to a lib also
+    /// used by a usermode app (compilation issues).
+    /// 
+    pub fn get_port_idx(&self) -> usize {
+        self.port_idx
     }
 }
 

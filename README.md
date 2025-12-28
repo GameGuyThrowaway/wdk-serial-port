@@ -1,3 +1,8 @@
+# ARCHIVED
+
+This project has been archived due to a fundamental incompatibility with proper Windows Driver Structure.
+
+This was originally made to get experience with WDK based development. In doing so, I have shifted towards using multiple drivers in the end product, as this library is fundamentally unsafe.
 
 # wdk-serial-port
 
@@ -157,3 +162,4 @@ fn serial_read_handler(port: &mut SerialPort) -> usize {
     data.len()
 }
 ```
+
